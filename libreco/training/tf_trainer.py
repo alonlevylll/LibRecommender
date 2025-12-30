@@ -4,6 +4,7 @@ from tqdm import tqdm
 from .trainer import BaseTrainer
 from ..batch import get_batch_loader, get_tf_feeds
 from ..evaluation import print_metrics
+from ..evaluation.metrics import compute_item_weights
 from ..layers import normalize_embeds
 from ..tfops import choose_tf_loss, lr_decay_config, tf, var_list_by_name
 from ..utils.constants import EmbeddingModels
@@ -56,6 +57,16 @@ class TensorFlowTrainer(BaseTrainer):
         eval_user_num,
         num_workers,
     ):
+        # Compute and store item weights for WRMSE loss if needed
+        if self.task == "rating" and self.loss_type == "wrmse":
+            item_weights = compute_item_weights(train_data, self.model.n_items)
+            self.model.item_weights_tf = tf.constant(
+                item_weights, dtype=tf.float32, name="item_weights"
+            )
+            self.loss = choose_tf_loss(self.model, self.task, self.loss_type)
+            self._build_optimizer_ops()
+            self.sess.run(tf.global_variables_initializer())
+        
         data_loader = get_batch_loader(
             self.model,
             train_data,
@@ -101,7 +112,15 @@ class TensorFlowTrainer(BaseTrainer):
                 print("=" * 30)
 
     def _build_train_ops(self, **kwargs):
+        if self.task == "rating" and self.loss_type == "wrmse":
+            return  # Built in run() after weights are computed from train_data
+        
         self.loss = choose_tf_loss(self.model, self.task, self.loss_type)
+        self._build_optimizer_ops(**kwargs)
+        self.sess.run(tf.global_variables_initializer())
+
+    def _build_optimizer_ops(self, **kwargs):
+        """Build optimizer operations from current loss."""
         if self.use_reg:
             reg_keys = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
             total_loss = self.loss + tf.add_n(reg_keys)
@@ -121,7 +140,6 @@ class TensorFlowTrainer(BaseTrainer):
         optimizer_op = optimizer.minimize(total_loss, global_step=global_steps)
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
         self.training_op = tf.group([optimizer_op, update_ops])
-        self.sess.run(tf.global_variables_initializer())
 
     def _check_reg(self):
         if hasattr(self.model, "reg") and self.model.reg is not None:
@@ -273,7 +291,15 @@ class WideDeepTrainer(TensorFlowTrainer):
         )
 
     def _build_train_ops(self, **kwargs):
+        if self.task == "rating" and self.loss_type == "wrmse":
+            return  # Built in run() after weights are computed from train_data
+        
         self.loss = choose_tf_loss(self.model, self.task, self.loss_type)
+        self._build_optimizer_ops(**kwargs)
+        self.sess.run(tf.global_variables_initializer())
+
+    def _build_optimizer_ops(self, **kwargs):
+        """Build optimizer operations from current loss."""
         if self.use_reg:
             reg_keys = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
             total_loss = self.loss + tf.add_n(reg_keys)
@@ -308,4 +334,38 @@ class WideDeepTrainer(TensorFlowTrainer):
 
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
         self.training_op = tf.group([wide_optimizer_op, deep_optimizer_op, update_ops])
-        self.sess.run(tf.global_variables_initializer())
+
+    def run(
+        self,
+        train_data,
+        neg_sampling,
+        verbose,
+        shuffle,
+        eval_data,
+        metrics,
+        k,
+        eval_batch_size,
+        eval_user_num,
+        num_workers,
+    ):
+        if self.task == "rating" and self.loss_type == "wrmse":
+            item_weights = compute_item_weights(train_data, self.model.n_items)
+            self.model.item_weights_tf = tf.constant(
+                item_weights, dtype=tf.float32, name="item_weights"
+            )
+            self.loss = choose_tf_loss(self.model, self.task, self.loss_type)
+            self._build_optimizer_ops()
+            self.sess.run(tf.global_variables_initializer())
+
+        super().run(
+            train_data,
+            neg_sampling,
+            verbose,
+            shuffle,
+            eval_data,
+            metrics,
+            k,
+            eval_batch_size,
+            eval_user_num,
+            num_workers,
+        )

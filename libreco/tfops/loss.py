@@ -1,11 +1,62 @@
 from .version import tf
 
 
+def weighted_mse_loss(labels, predictions, item_indices, item_weights):
+    """Compute weighted mean squared error loss.
+    
+    Parameters
+    ----------
+    labels : tf.Tensor
+        True ratings.
+    predictions : tf.Tensor
+        Predicted ratings.
+    item_indices : tf.Tensor
+        Item IDs for each sample in the batch.
+    item_weights : tf.Tensor
+        Pre-computed weights for each item (constant tensor).
+    
+    Returns
+    -------
+    tf.Tensor
+        Weighted MSE loss value.
+    """
+    # Get weights for items in current batch
+    batch_weights = tf.gather(item_weights, item_indices)
+    
+    # Compute squared errors
+    squared_error = tf.square(predictions - labels)
+    
+    # Compute weighted squared error
+    weighted_squared_error = batch_weights * squared_error
+    
+    # Return mean of weighted squared errors
+    return tf.reduce_mean(weighted_squared_error)
+
+
 def choose_tf_loss(model, task, loss_type):
     if task == "rating":
-        loss = tf.losses.mean_squared_error(
-            labels=model.labels, predictions=model.output
-        )
+        if loss_type == "wrmse":
+            # Check if item_weights are available
+            if not hasattr(model, "item_weights_tf") or model.item_weights_tf is None:
+                raise ValueError(
+                    "Item weights must be computed before using 'wrmse' loss. "
+                    "This should be done automatically during training. "
+                    "If you see this error, please report it as a bug."
+                )
+            if not hasattr(model, "item_indices"):
+                raise ValueError(
+                    "Model must have 'item_indices' placeholder for 'wrmse' loss."
+                )
+            loss = weighted_mse_loss(
+                labels=model.labels,
+                predictions=model.output,
+                item_indices=model.item_indices,
+                item_weights=model.item_weights_tf,
+            )
+        else:
+            loss = tf.losses.mean_squared_error(
+                labels=model.labels, predictions=model.output
+            )
     else:
         if loss_type == "cross_entropy":
             assert hasattr(model, "output"), (
