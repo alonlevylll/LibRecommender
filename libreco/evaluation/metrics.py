@@ -8,7 +8,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-RATING_METRICS = {"loss", "rmse", "mae", "r2"}
+RATING_METRICS = {"loss", "rmse", "mae", "r2", "wrmse"}
 POINTWISE_METRICS = {
     "loss",
     "log_loss",
@@ -23,6 +23,72 @@ RANKING_METRICS = POINTWISE_METRICS | LISTWISE_METRICS
 
 def rmse(y_true, y_pred):
     return np.sqrt(mean_squared_error(y_true, y_pred))
+
+
+def compute_item_weights(train_data, n_items):
+    """Compute item weights from training data for weighted RMSE.
+    
+    Parameters
+    ----------
+    train_data : :class:`~libreco.data.TransformedSet`
+        Training dataset containing item_indices.
+    n_items : int
+        Total number of items in the dataset.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Array of weights for each item, where weight = 1 / sqrt(count).
+    """
+    # Get all item IDs from the training dataset
+    all_item_ids = train_data.item_indices
+    
+    # Count frequency of each item
+    item_counts = np.bincount(all_item_ids, minlength=n_items).astype(np.float32)
+    
+    # Handle zero counts (e.g., padding index 0)
+    item_counts[item_counts == 0] = 1.0
+    
+    # Compute weight: 1 / sqrt(count)
+    weights = 1.0 / np.sqrt(item_counts)
+    
+    return weights
+
+
+def wrmse(y_true, y_pred, item_indices, item_weights):
+    """Compute Weighted Root Mean Squared Error (WRMSE).
+    
+    Parameters
+    ----------
+    y_true : numpy.ndarray
+        True ratings.
+    y_pred : numpy.ndarray
+        Predicted ratings.
+    item_indices : numpy.ndarray
+        Item IDs for each prediction.
+    item_weights : numpy.ndarray
+        Pre-computed weights for each item.
+    
+    Returns
+    -------
+    float
+        Weighted RMSE value.
+    """
+    # Get weights for items in current batch
+    batch_weights = item_weights[item_indices]
+    
+    # Compute squared errors
+    squared_error = (y_pred - y_true) ** 2
+    
+    # Compute weighted squared error sum and weight sum
+    w_sse = np.sum(batch_weights * squared_error)
+    w_sum = np.sum(batch_weights)
+    
+    if w_sum == 0:
+        return 0.0
+    
+    # Return weighted RMSE
+    return np.sqrt(w_sse / w_sum)
 
 
 # https://scikit-learn.org/stable/modules/generated/sklearn.metrics.balanced_accuracy_score.html

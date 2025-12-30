@@ -20,6 +20,7 @@ from .metrics import (
     RATING_METRICS,
     average_precision_at_k,
     balanced_accuracy,
+    compute_item_weights,
     listwise_scores,
     ndcg_at_k,
     pr_auc_score,
@@ -28,6 +29,7 @@ from .metrics import (
     recall_at_k,
     rmse,
     roc_gauc_score,
+    wrmse,
 )
 from ..data import TransformedEvalSet
 
@@ -68,6 +70,7 @@ def evaluate(
     k=10,
     sample_user_num=None,
     seed=42,
+    train_data=None,
 ):
     """Evaluate the model on specific data and metrics.
 
@@ -108,7 +111,16 @@ def evaluate(
     metrics = _check_metrics(model.task, metrics, k)
     eval_result = dict()
     if model.task == "rating":
-        y_pred, y_true = compute_preds(model, data, eval_batch_size)
+        y_pred, y_true, y_item_indices = compute_preds(model, data, eval_batch_size)
+        # Compute item weights for wrmse if needed
+        item_weights = None
+        if "wrmse" in metrics:
+            if train_data is None:
+                raise ValueError(
+                    "`train_data` must be provided when computing `wrmse` metric. "
+                    "Please pass the training dataset used to fit the model."
+                )
+            item_weights = compute_item_weights(train_data, model.n_items)
         for m in metrics:
             if m in ["rmse", "loss"]:
                 eval_result[m] = rmse(y_true, y_pred)
@@ -116,6 +128,14 @@ def evaluate(
                 eval_result[m] = mean_absolute_error(y_true, y_pred)
             elif m == "r2":
                 eval_result[m] = r2_score(y_true, y_pred)
+            elif m == "wrmse":
+                y_item_indices_array = np.asarray(y_item_indices)
+                eval_result[m] = wrmse(
+                    np.asarray(y_true),
+                    np.asarray(y_pred),
+                    y_item_indices_array,
+                    item_weights,
+                )
     else:
         if POINTWISE_METRICS.intersection(metrics):
             y_prob, y_true = compute_probs(model, data, eval_batch_size)
@@ -158,7 +178,7 @@ def evaluate(
 def print_metrics(
     model,
     neg_sampling,
-    # train_data=None,
+    train_data=None,
     eval_data=None,
     metrics=None,
     eval_batch_size=8192,
@@ -175,6 +195,7 @@ def print_metrics(
         k=k,
         sample_user_num=sample_user_num,
         seed=seed,
+        train_data=train_data,
     )
     # if train_data:
     #    train_metrics = metrics_fn(data=train_data, metrics=[loss_name])

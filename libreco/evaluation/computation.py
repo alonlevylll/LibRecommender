@@ -26,16 +26,19 @@ def build_eval_transformed_data(model, data, neg_sampling, seed):
 def compute_preds(model, data, batch_size):
     y_pred = list()
     y_label = list()
+    y_item_indices = list()
     for i in tqdm(range(0, len(data), batch_size), desc="eval_pointwise"):
         user_indices, item_indices, labels = data[i : i + batch_size]
         preds = model.predict(user_indices, item_indices, inner_id=True)
         y_pred.extend(preds)
         y_label.extend(labels)
-    return y_pred, y_label
+        y_item_indices.extend(item_indices)
+    return y_pred, y_label, y_item_indices
 
 
 def compute_probs(model, data, batch_size):
-    return compute_preds(model, data, batch_size)
+    y_pred, y_label, _ = compute_preds(model, data, batch_size)
+    return y_pred, y_label
 
 
 def compute_recommends(model, users, k, num_batch_users):
