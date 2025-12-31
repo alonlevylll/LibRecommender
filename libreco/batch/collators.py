@@ -227,39 +227,59 @@ class BaseCollator:
         return user_rating_vectors
 
     def get_user_rating_stats(self, user_indices, item_indices, mask_current_item=True):
-        """Compute user rating stats (mean, std) directly from sparse matrix.
+        """Get user rating stats (mean, std) using pre-computed cache.
         
-        This is much faster than creating full dense vectors when only stats are needed.
+        Stats are pre-computed once per user and cached for O(1) lookup.
         Returns [batch_size, 2] array with [mean, std] for each user.
         """
-        # Only compute when stats are needed but full vectors are not
         if not self.use_user_rating_stats or self.use_user_rating_vector:
             return None
         if self.sparse_interaction is None:
             return None
         
-        batch_size = len(user_indices)
-        user_rating_stats = np.zeros((batch_size, 2), dtype=np.float32)
+        # Lazily initialize the stats cache
+        if not hasattr(self, '_user_stats_cache'):
+            self._precompute_user_stats()
         
-        sparse_n_rows = self.sparse_interaction.shape[0]
+        # Fast vectorized lookup
+        user_indices = np.asarray(user_indices)
+        valid_mask = user_indices < len(self._user_stats_cache)
         
-        for i, (user_idx, item_idx) in enumerate(zip(user_indices, item_indices)):
-            if user_idx < sparse_n_rows:
-                user_row = self.sparse_interaction[user_idx]
-                # Get non-zero values directly from sparse row
-                data = user_row.data.copy()
-                indices = user_row.indices
-                
-                # Mask current item if needed
-                if mask_current_item:
-                    mask = indices != item_idx
-                    data = data[mask]
-                
-                if len(data) > 0:
-                    user_rating_stats[i, 0] = np.mean(data)  # mean
-                    user_rating_stats[i, 1] = np.std(data)   # std
+        result = np.zeros((len(user_indices), 2), dtype=np.float32)
+        result[valid_mask] = self._user_stats_cache[user_indices[valid_mask]]
         
-        return user_rating_stats
+        return result
+    
+    def _precompute_user_stats(self):
+        """Pre-compute mean and std for all users from sparse matrix (vectorized)."""
+        n_users = self.sparse_interaction.shape[0]
+        
+        # Compute counts per user (vectorized)
+        indptr = self.sparse_interaction.indptr
+        counts = np.diff(indptr).astype(np.float32)
+        counts_safe = np.maximum(counts, 1)  # Avoid division by zero
+        
+        # Compute sum per user using sparse matrix-vector multiplication
+        ones = np.ones(self.sparse_interaction.shape[1], dtype=np.float32)
+        sums = np.asarray(self.sparse_interaction.dot(ones)).flatten()
+        
+        # Mean = sum / count
+        means = sums / counts_safe
+        means[counts == 0] = 0
+        
+        # For std: need sum of squares
+        # Compute element-wise square then sum per row
+        sparse_squared = self.sparse_interaction.copy()
+        sparse_squared.data = sparse_squared.data ** 2
+        sum_sq = np.asarray(sparse_squared.dot(ones)).flatten()
+        
+        # Std = sqrt(E[X^2] - E[X]^2)
+        variance = (sum_sq / counts_safe) - (means ** 2)
+        variance = np.maximum(variance, 0)  # Numerical stability
+        stds = np.sqrt(variance)
+        stds[counts == 0] = 0
+        
+        self._user_stats_cache = np.column_stack([means, stds]).astype(np.float32)
 
 
 class SparseCollator(BaseCollator):

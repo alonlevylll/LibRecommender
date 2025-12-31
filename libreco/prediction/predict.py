@@ -42,31 +42,54 @@ def get_user_rating_vectors_for_inference(model, user_indices):
 
 
 def get_user_rating_stats_for_inference(model, user_indices):
-    """Get user rating stats (mean, std) for inference.
+    """Get user rating stats (mean, std) for inference using cached stats.
     
     Only used when use_user_rating_stats is enabled but use_user_rating_vector is not.
-    This is faster as it computes directly from sparse matrix without densifying.
     """
     use_rating_vector = getattr(model, "use_user_rating_vector", False)
     use_rating_stats = getattr(model, "use_user_rating_stats", False)
     
-    # Only return stats when stats-only mode (not when vectors are also used)
     if not use_rating_stats or use_rating_vector or model.sparse_interaction is None:
         return None
     
+    # Lazily initialize cached stats on the model
+    if not hasattr(model, '_user_stats_cache'):
+        _precompute_model_user_stats(model)
+    
     user_indices = np.asarray(user_indices)
-    batch_size = len(user_indices)
-    user_rating_stats = np.zeros((batch_size, 2), dtype=np.float32)
+    valid_mask = user_indices < len(model._user_stats_cache)
     
-    sparse_n_rows = model.sparse_interaction.shape[0]
+    result = np.zeros((len(user_indices), 2), dtype=np.float32)
+    result[valid_mask] = model._user_stats_cache[user_indices[valid_mask]]
     
-    for i, user_idx in enumerate(user_indices):
-        if user_idx < sparse_n_rows:
-            user_row = model.sparse_interaction[user_idx]
-            data = user_row.data
-            if len(data) > 0:
-                user_rating_stats[i, 0] = np.mean(data)  # mean
-                user_rating_stats[i, 1] = np.std(data)   # std
+    return result
+
+
+def _precompute_model_user_stats(model):
+    """Pre-compute mean and std for all users (vectorized)."""
+    sparse = model.sparse_interaction
+    n_users = sparse.shape[0]
+    
+    # Counts per user
+    indptr = sparse.indptr
+    counts = np.diff(indptr).astype(np.float32)
+    counts_safe = np.maximum(counts, 1)
+    
+    # Sum per user
+    ones = np.ones(sparse.shape[1], dtype=np.float32)
+    sums = np.asarray(sparse.dot(ones)).flatten()
+    means = sums / counts_safe
+    means[counts == 0] = 0
+    
+    # Sum of squares for std
+    sparse_sq = sparse.copy()
+    sparse_sq.data = sparse_sq.data ** 2
+    sum_sq = np.asarray(sparse_sq.dot(ones)).flatten()
+    variance = np.maximum((sum_sq / counts_safe) - (means ** 2), 0)
+    stds = np.sqrt(variance)
+    stds[counts == 0] = 0
+    
+    model._user_stats_cache = np.column_stack([means, stds]).astype(np.float32)
     
     return user_rating_stats
 
