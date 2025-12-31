@@ -30,8 +30,8 @@ class DIN(TfBase, metaclass=ModelMeta):
         Recommendation task. See :ref:`Task`.
     data_info : :class:`~libreco.data.DataInfo` object
         Object that contains useful information for training and inference.
-    loss_type : {'cross_entropy', 'focal', 'wrmse'}, default: 'cross_entropy'
-        Loss for model training. For rating task, 'wrmse' (Weighted Root Mean Squared Error)
+    loss_type : {'cross_entropy', 'focal', 'wmse'}, default: 'cross_entropy'
+        Loss for model training. For rating task, 'wmse' (Weighted Mean Squared Error)
         can be used to weight items by their frequency in the training data.
     embed_size: int, default: 16
         Vector size of embeddings.

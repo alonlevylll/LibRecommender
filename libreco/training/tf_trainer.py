@@ -57,8 +57,8 @@ class TensorFlowTrainer(BaseTrainer):
         eval_user_num,
         num_workers,
     ):
-        # Compute and store item weights for WRMSE loss if needed
-        if self.task == "rating" and self.loss_type == "wrmse":
+        # Compute and store item weights for WMSE loss if needed
+        if self.task == "rating" and self.loss_type == "wmse":
             item_weights = compute_item_weights(train_data, self.model.n_items)
             self.model.item_weights_tf = tf.constant(
                 item_weights, dtype=tf.float32, name="item_weights"
@@ -113,7 +113,7 @@ class TensorFlowTrainer(BaseTrainer):
                 print("=" * 30)
 
     def _build_train_ops(self, **kwargs):
-        if self.task == "rating" and self.loss_type == "wrmse":
+        if self.task == "rating" and self.loss_type == "wmse":
             return  # Built in run() after weights are computed from train_data
         
         self.loss = choose_tf_loss(self.model, self.task, self.loss_type)
@@ -292,7 +292,7 @@ class WideDeepTrainer(TensorFlowTrainer):
         )
 
     def _build_train_ops(self, **kwargs):
-        if self.task == "rating" and self.loss_type == "wrmse":
+        if self.task == "rating" and self.loss_type == "wmse":
             return  # Built in run() after weights are computed from train_data
         
         self.loss = choose_tf_loss(self.model, self.task, self.loss_type)
@@ -349,7 +349,7 @@ class WideDeepTrainer(TensorFlowTrainer):
         eval_user_num,
         num_workers,
     ):
-        if self.task == "rating" and self.loss_type == "wrmse":
+        if self.task == "rating" and self.loss_type == "wmse":
             item_weights = compute_item_weights(train_data, self.model.n_items)
             self.model.item_weights_tf = tf.constant(
                 item_weights, dtype=tf.float32, name="item_weights"

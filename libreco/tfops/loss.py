@@ -35,17 +35,17 @@ def weighted_mse_loss(labels, predictions, item_indices, item_weights):
 
 def choose_tf_loss(model, task, loss_type):
     if task == "rating":
-        if loss_type == "wrmse":
+        if loss_type == "wmse":
             # Check if item_weights are available
             if not hasattr(model, "item_weights_tf") or model.item_weights_tf is None:
                 raise ValueError(
-                    "Item weights must be computed before using 'wrmse' loss. "
+                    "Item weights must be computed before using 'wmse' loss. "
                     "This should be done automatically during training. "
                     "If you see this error, please report it as a bug."
                 )
             if not hasattr(model, "item_indices"):
                 raise ValueError(
-                    "Model must have 'item_indices' placeholder for 'wrmse' loss."
+                    "Model must have 'item_indices' placeholder for 'wmse' loss."
                 )
             loss = weighted_mse_loss(
                 labels=model.labels,
