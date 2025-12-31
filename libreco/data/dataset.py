@@ -1068,17 +1068,19 @@ def _construct_unique_feat_lazy(
 ):
     """Construct unique feature arrays from feature DataFrames for lazy loading.
 
+    Uses vectorized operations for fast initialization.
     This function builds the unique feature matrices (user_sparse_unique, etc.)
     that are needed for looking up features during negative sampling.
     The sparse indices include offsets to match the non-lazy version.
     """
+    import pandas as pd
+
     user_sparse_unique = None
     user_dense_unique = None
     item_sparse_unique = None
     item_dense_unique = None
 
     # Build global column to offset mapping
-    # Offset for each column is the cumulative sum of previous columns' vocab sizes + 1 (for oov)
     all_sparse_cols = list(col_name_mapping.get("sparse_col", {}).keys())
     all_multi_sparse_cols = []
     if "multi_sparse" in col_name_mapping:
@@ -1087,15 +1089,20 @@ def _construct_unique_feat_lazy(
 
     # Calculate offsets for each column
     col_offset = {}
+    col_oov = {}
+    col_idx_mapping = {}
     cumulative_offset = 0
+    
     for col in all_sparse_cols:
         col_offset[col] = cumulative_offset
         if sparse_unique_vals and col in sparse_unique_vals:
-            cumulative_offset += len(sparse_unique_vals[col]) + 1  # +1 for oov
+            unique_vals = sparse_unique_vals[col]
+            col_oov[col] = len(unique_vals)
+            col_idx_mapping[col] = dict(zip(unique_vals, range(len(unique_vals))))
+            cumulative_offset += len(unique_vals) + 1
 
     for col in all_multi_sparse_cols:
         col_offset[col] = cumulative_offset
-        # Find the field for this column to get unique values
         field_name = None
         if "multi_sparse" in col_name_mapping:
             for fname, fcols in col_name_mapping["multi_sparse"].items():
@@ -1103,116 +1110,112 @@ def _construct_unique_feat_lazy(
                     field_name = fname
                     break
         if field_name and multi_sparse_unique_vals and field_name in multi_sparse_unique_vals:
-            # All columns in a multi_sparse field share the same vocab size
-            cumulative_offset += len(multi_sparse_unique_vals[field_name]) + 1
+            unique_vals = multi_sparse_unique_vals[field_name]
+            col_oov[col] = len(unique_vals)
+            col_idx_mapping[col] = dict(zip(unique_vals, range(len(unique_vals))))
+            cumulative_offset += len(unique_vals) + 1
 
-    # Helper function to get sparse indices for a DataFrame
-    def _get_sparse_indices(df, id_col, id_unique_vals, sparse_cols):
+    def _get_sparse_indices_vectorized(df, id_col, id_unique_vals, sparse_cols):
+        """Vectorized sparse feature extraction."""
         if df is None or not sparse_cols:
             return None
 
-        # Ensure df has proper index for lookup
-        df_dedup = df.drop_duplicates(subset=[id_col], keep="last")
-        df_dedup = df_dedup.set_index(id_col)
-
-        # Build indices matrix
         n_ids = len(id_unique_vals)
         n_features = len(sparse_cols)
         indices = np.zeros((n_ids, n_features), dtype=np.int32)
 
+        # Initialize with OOV values
         for j, col in enumerate(sparse_cols):
-            if col not in df_dedup.columns:
-                # Set to oov with offset for missing columns
-                offset = col_offset.get(col, 0)
-                if sparse_unique_vals and col in sparse_unique_vals:
-                    oov_val = len(sparse_unique_vals[col])
-                elif multi_sparse_unique_vals:
-                    field_name = None
-                    if "multi_sparse" in col_name_mapping:
-                        for fname, fcols in col_name_mapping["multi_sparse"].items():
-                            if col in fcols:
-                                field_name = fname
-                                break
-                    if field_name and field_name in multi_sparse_unique_vals:
-                        oov_val = len(multi_sparse_unique_vals[field_name])
-                    else:
-                        oov_val = 0
-                else:
-                    oov_val = 0
-                indices[:, j] = oov_val + offset
-                continue
-
-            # Get offset for this column
             offset = col_offset.get(col, 0)
+            oov_val = col_oov.get(col, 0)
+            indices[:, j] = oov_val + offset
 
-            # Determine which unique values dict to use
-            if sparse_unique_vals and col in sparse_unique_vals:
-                unique_vals = sparse_unique_vals[col]
-            elif multi_sparse_unique_vals:
-                # Find the field for this column
-                field_name = None
-                if "multi_sparse" in col_name_mapping:
-                    for fname, fcols in col_name_mapping["multi_sparse"].items():
-                        if col in fcols:
-                            field_name = fname
-                            break
-                if field_name and field_name in multi_sparse_unique_vals:
-                    unique_vals = multi_sparse_unique_vals[field_name]
-                else:
-                    continue
-            else:
+        # Build reverse mapping: original_id -> inner_id
+        orig_to_inner = pd.Series(np.arange(n_ids), index=id_unique_vals)
+
+        # Deduplicate
+        df_dedup = df.drop_duplicates(subset=[id_col], keep="last")
+
+        # Filter to valid IDs
+        valid_mask = df_dedup[id_col].isin(id_unique_vals)
+        df_valid = df_dedup[valid_mask]
+
+        if len(df_valid) == 0:
+            return indices
+
+        # Get inner IDs for all valid rows at once
+        inner_ids = orig_to_inner.loc[df_valid[id_col].values].values
+
+        # Vectorized assignment for each column
+        for j, col in enumerate(sparse_cols):
+            if col not in df_valid.columns:
                 continue
 
-            oov_val = len(unique_vals)
-            idx_mapping = dict(zip(unique_vals, range(len(unique_vals))))
+            offset = col_offset.get(col, 0)
+            oov_val = col_oov.get(col, 0)
+            idx_mapping = col_idx_mapping.get(col)
 
-            for i, uid in enumerate(id_unique_vals):
-                if uid in df_dedup.index:
-                    val = df_dedup.loc[uid, col]
-                    indices[i, j] = idx_mapping.get(val, oov_val) + offset
-                else:
-                    indices[i, j] = oov_val + offset
+            if idx_mapping is None:
+                continue
+
+            col_vals = df_valid[col].values
+            # Vectorized mapping
+            mapped_indices = np.array([
+                idx_mapping.get(v, oov_val) + offset for v in col_vals
+            ], dtype=np.int32)
+            indices[inner_ids, j] = mapped_indices
 
         return indices
 
-    # Helper function to get dense values
-    def _get_dense_values(df, id_col, id_unique_vals, dense_cols):
+    def _get_dense_values_vectorized(df, id_col, id_unique_vals, dense_cols):
+        """Vectorized dense feature extraction."""
         if df is None or not dense_cols:
             return None
-
-        df_dedup = df.drop_duplicates(subset=[id_col], keep="last")
-        df_dedup = df_dedup.set_index(id_col)
 
         n_ids = len(id_unique_vals)
         n_features = len(dense_cols)
         values = np.zeros((n_ids, n_features), dtype=np.float32)
 
+        # Build reverse mapping
+        orig_to_inner = pd.Series(np.arange(n_ids), index=id_unique_vals)
+
+        # Deduplicate
+        df_dedup = df.drop_duplicates(subset=[id_col], keep="last")
+
+        # Filter to valid IDs
+        valid_mask = df_dedup[id_col].isin(id_unique_vals)
+        df_valid = df_dedup[valid_mask]
+
+        if len(df_valid) == 0:
+            return values
+
+        # Get inner IDs
+        inner_ids = orig_to_inner.loc[df_valid[id_col].values].values
+
+        # Vectorized assignment
         for j, col in enumerate(dense_cols):
-            if col not in df_dedup.columns:
+            if col not in df_valid.columns:
                 continue
-            for i, uid in enumerate(id_unique_vals):
-                if uid in df_dedup.index:
-                    values[i, j] = df_dedup.loc[uid, col]
+            col_vals = df_valid[col].values.astype(np.float32)
+            values[inner_ids, j] = col_vals
 
         return values
 
-    # Build user features
+    # Build features using vectorized functions
     if user_sparse_col_names:
-        user_sparse_unique = _get_sparse_indices(
+        user_sparse_unique = _get_sparse_indices_vectorized(
             user_features, "user", user_unique_vals, user_sparse_col_names
         )
     if user_dense_col_names:
-        user_dense_unique = _get_dense_values(
+        user_dense_unique = _get_dense_values_vectorized(
             user_features, "user", user_unique_vals, user_dense_col_names
         )
-
-    # Build item features
     if item_sparse_col_names:
-        item_sparse_unique = _get_sparse_indices(
+        item_sparse_unique = _get_sparse_indices_vectorized(
             item_features, "item", item_unique_vals, item_sparse_col_names
         )
     if item_dense_col_names:
-        item_dense_unique = _get_dense_values(
+        item_dense_unique = _get_dense_values_vectorized(
             item_features, "item", item_unique_vals, item_dense_col_names
         )
 
