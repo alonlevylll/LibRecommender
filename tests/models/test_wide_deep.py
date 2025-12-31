@@ -191,3 +191,81 @@ def test_wide_deep_softmax_validation():
             data_info=None,
             loss_type="softmax",
         )
+
+
+def test_wide_deep_user_rating_vector(feat_data_small):
+    """Test WideDeep with user rating vector feature.
+    
+    The user rating vector is an interaction-based dense feature that represents
+    all user ratings for all items. During training, the rating for the current
+    item is masked (set to 0) to prevent data leakage. During inference, the
+    full rating vector is used.
+    """
+    tf.compat.v1.reset_default_graph()
+    pd_data, train_data, eval_data, data_info = feat_data_small
+    
+    model = WideDeep(
+        task="rating",
+        data_info=data_info,
+        embed_size=4,
+        n_epochs=2,
+        lr={"wide": 0.01, "deep": 3e-4},
+        batch_size=80,
+        hidden_units=(16, 8),
+        use_user_rating_vector=True,  # Enable user rating vector feature
+    )
+    
+    # Verify the parameter is set
+    assert model.use_user_rating_vector is True
+    
+    model.fit(
+        train_data,
+        neg_sampling=False,
+        verbose=2,
+        shuffle=True,
+        eval_data=eval_data,
+        metrics=get_metrics("rating"),
+    )
+    
+    # Verify sparse_interaction is stored after training
+    assert model.sparse_interaction is not None
+    
+    # Test predictions work correctly
+    ptest_preds(model, "rating", pd_data, with_feats=True)
+    ptest_recommends(model, data_info, pd_data, with_feats=True)
+
+
+def test_wide_deep_user_rating_vector_ranking(feat_data_small):
+    """Test WideDeep with user rating vector feature for ranking task."""
+    tf.compat.v1.reset_default_graph()
+    pd_data, train_data, eval_data, data_info = feat_data_small
+    
+    model = WideDeep(
+        task="ranking",
+        data_info=data_info,
+        loss_type="cross_entropy",
+        embed_size=4,
+        n_epochs=1,
+        lr={"wide": 0.01, "deep": 3e-4},
+        batch_size=80,
+        sampler="random",
+        num_neg=1,
+        hidden_units=(16, 8),
+        use_user_rating_vector=True,
+    )
+    
+    model.fit(
+        train_data,
+        neg_sampling=True,
+        verbose=2,
+        shuffle=True,
+        eval_data=eval_data,
+        metrics=get_metrics("ranking"),
+    )
+    
+    # Verify sparse_interaction is stored
+    assert model.sparse_interaction is not None
+    
+    # Test predictions
+    ptest_preds(model, "ranking", pd_data, with_feats=True)
+    ptest_recommends(model, data_info, pd_data, with_feats=True)

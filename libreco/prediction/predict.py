@@ -15,6 +15,41 @@ from ..tfops.features import get_dual_seq_feed_dict, get_feed_dict
 from ..utils.validate import check_unknown
 
 
+def get_user_rating_vectors_for_inference(model, user_indices):
+    """Get full user rating vectors for inference (without masking).
+    
+    Parameters
+    ----------
+    model : object
+        Model object with sparse_interaction attribute.
+    user_indices : array_like
+        Array of user indices.
+        
+    Returns
+    -------
+    numpy.ndarray or None
+        Array of shape [batch_size, n_items] with full user rating vectors,
+        or None if the model doesn't use user rating vectors.
+    """
+    if not getattr(model, "use_user_rating_vector", False):
+        return None
+    if model.sparse_interaction is None:
+        return None
+    
+    user_indices = np.asarray(user_indices)
+    batch_size = len(user_indices)
+    n_items = model.n_items
+    
+    user_rating_vectors = np.zeros((batch_size, n_items), dtype=np.float32)
+    
+    for i, user_idx in enumerate(user_indices):
+        if user_idx < model.sparse_interaction.shape[0]:
+            # Get the user's row from sparse matrix as dense array
+            user_rating_vectors[i] = model.sparse_interaction[user_idx].toarray().flatten()
+    
+    return user_rating_vectors
+
+
 def normalize_prediction(preds, model, cold_start, unknown_num, unknown_index):
     if model.task == "rating":
         preds = np.clip(preds, model.lower_bound, model.upper_bound)
@@ -59,6 +94,9 @@ def predict_tf_feat(model, user, item, feats, cold_start, inner_id):
             model.data_info, sparse_indices, dense_values, feats
         )
 
+    # Get full user rating vectors for inference (without masking)
+    user_rating_vectors = get_user_rating_vectors_for_inference(model, user_indices)
+
     if model.model_name == "SIM":
         long_seqs, long_lens, short_seqs, short_lens = get_cached_dual_seq(
             model, user_indices, repeat=False
@@ -86,6 +124,7 @@ def predict_tf_feat(model, user, item, feats, cold_start, inner_id):
             dense_values=dense_values,
             user_interacted_seq=seqs,
             user_interacted_len=seq_len,
+            user_rating_vectors=user_rating_vectors,
             is_training=False,
         )
         preds = model.sess.run(model.output, feed_dict)
@@ -109,6 +148,8 @@ def predict_data_with_feats(
         sparse_indices, dense_values = features_from_batch(
             model.data_info, model.sparse, model.dense, batch_data
         )
+        # Get full user rating vectors for inference (without masking)
+        user_rating_vectors = get_user_rating_vectors_for_inference(model, user_indices)
 
         if model.model_name == "SIM":
             long_seqs, long_lens, short_seqs, short_lens = get_cached_dual_seq(
@@ -137,6 +178,7 @@ def predict_data_with_feats(
                 dense_values=dense_values,
                 user_interacted_seq=seqs,
                 user_interacted_len=seq_len,
+                user_rating_vectors=user_rating_vectors,
                 is_training=False,
             )
             preds[batch_slice] = model.sess.run(model.output, feed_dict)

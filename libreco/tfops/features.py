@@ -249,6 +249,7 @@ def get_feed_dict(
     item_dense_values=None,
     user_interacted_seq=None,
     user_interacted_len=None,
+    user_rating_vectors=None,
     is_training=False,
 ):
     feed_dict = dict()
@@ -279,6 +280,13 @@ def get_feed_dict(
                 model.user_interacted_len: user_interacted_len,
             }
         )
+    # User rating vector feature (for inference, use full vectors without masking)
+    if (
+        hasattr(model, "use_user_rating_vector")
+        and model.use_user_rating_vector
+        and user_rating_vectors is not None
+    ):
+        feed_dict.update({model.user_rating_vector: user_rating_vectors})
     return feed_dict
 
 

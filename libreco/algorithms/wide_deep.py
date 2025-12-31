@@ -80,6 +80,10 @@ class WideDeep(TfBase, metaclass=ModelMeta):
 
     multi_sparse_combiner : {'normal', 'mean', 'sum', 'sqrtn'}, default: 'sqrtn'
         Options for combining `multi_sparse` features.
+    use_user_rating_vector : bool, default: False
+        Whether to use user's rating history as an interaction-based dense feature.
+        During training, the rating for the current item is masked (set to 0) to prevent
+        data leakage. During inference, the full rating vector is used.
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -105,6 +109,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
     item_variables = ("embedding/item_wide_var", "embedding/item_deep_var")
     sparse_variables = ("embedding/sparse_wide_var", "embedding/sparse_deep_var")
     dense_variables = ("embedding/dense_wide_var", "embedding/dense_deep_var")
+    rating_vector_variables = ("embedding/rating_vector_wide_var", "embedding/rating_vector_deep_var")
 
     def __init__(
         self,
@@ -124,6 +129,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         dropout_rate=None,
         hidden_units=(128, 64, 32),
         multi_sparse_combiner="sqrtn",
+        use_user_rating_vector=False,
         seed=42,
         lower_upper_bound=None,
         tf_sess_config=None,
@@ -144,6 +150,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.use_bn = use_bn
         self.dropout_rate = dropout_config(dropout_rate)
         self.hidden_units = hidden_units_config(hidden_units)
+        self.use_user_rating_vector = use_user_rating_vector
         self.seed = seed
         self.sparse = check_sparse_indices(data_info)
         self.dense = check_dense_values(data_info)
@@ -167,6 +174,9 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.rating_labels = None
         self.n_rating_classes = None
         self.rating_label_to_index = None
+        
+        # Store sparse_interaction for user rating vector feature
+        self.sparse_interaction = None
 
     def build_model(self):
         tf.set_random_seed(self.seed)
@@ -184,6 +194,8 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             self._build_sparse()
         if self.dense:
             self._build_dense()
+        if self.use_user_rating_vector:
+            self._build_user_rating_vector()
 
         wide_embed = tf.concat(self.wide_embed, axis=1)
         deep_embed = tf.concat(self.deep_embed, axis=1)
@@ -308,6 +320,61 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.wide_embed.append(wide_dense_embed)
         self.deep_embed.append(deep_dense_embed)
 
+    def _build_user_rating_vector(self):
+        """Build user rating vector feature.
+        
+        This feature represents user's ratings for all items as a dense vector
+        of length n_items. During training, the rating for the current item is 
+        masked (set to 0) to prevent data leakage. During inference, the full 
+        rating vector is used.
+        
+        To avoid parameter explosion and overfitting:
+        - Wide part: single weighted sum (1 parameter per item)
+        - Deep part: compressed projection to embed_size (n_items × embed_size params)
+        - L2 normalization applied to reduce scale sensitivity
+        """
+        # Placeholder for user rating vector [batch_size, n_items]
+        self.user_rating_vector = tf.placeholder(
+            tf.float32, shape=[None, self.n_items], name="user_rating_vector"
+        )
+        
+        # Normalize the rating vector to unit length (L2 normalization)
+        # This helps with:
+        # 1. Users with many ratings vs few ratings having similar scale
+        # 2. Preventing large rating values from dominating
+        # Use epsilon to handle all-zero vectors (new users or fully masked)
+        rating_vector_norm = tf.nn.l2_normalize(
+            self.user_rating_vector, axis=1, epsilon=1e-12
+        )
+        
+        with tf.variable_scope("embedding"):
+            # Wide part: weighted sum of all normalized ratings -> scalar per sample
+            # Shape: [n_items] -> learns importance weight per item
+            wide_rating_var = tf.get_variable(
+                name="rating_vector_wide_var",
+                shape=[self.n_items],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            # [batch, n_items] * [n_items] -> [batch, n_items] -> sum -> [batch, 1]
+            wide_rating_embed = tf.reduce_sum(
+                rating_vector_norm * wide_rating_var, axis=1, keepdims=True
+            )
+            
+            # Deep part: single projection matrix to compress to embed_size
+            # Shape: [n_items, embed_size] -> projects entire rating vector to embed_size
+            deep_rating_var = tf.get_variable(
+                name="rating_vector_deep_var",
+                shape=[self.n_items, self.embed_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            # [batch, n_items] @ [n_items, embed_size] -> [batch, embed_size]
+            deep_rating_embed = tf.matmul(rating_vector_norm, deep_rating_var)
+        
+        self.wide_embed.append(wide_rating_embed)
+        self.deep_embed.append(deep_rating_embed)
+
     @staticmethod
     def check_lr(lr):
         if not lr:
@@ -363,6 +430,10 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         # Extract rating labels from training data for softmax loss
         if self.loss_type == "softmax" and self.rating_labels is None:
             self._setup_rating_labels(train_data)
+
+        # Store sparse_interaction for user rating vector feature
+        if self.use_user_rating_vector and self.sparse_interaction is None:
+            self.sparse_interaction = train_data.sparse_interaction
 
         # Call parent fit()
         super().fit(
@@ -434,6 +505,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
                 f"Current loss_type is '{self.loss_type}'."
             )
 
+        from ..prediction.predict import get_user_rating_vectors_for_inference
         from ..prediction.preprocess import convert_id, get_cached_seqs, get_original_feats, set_temp_feats
         from ..tfops.features import get_feed_dict
         from ..utils.validate import check_unknown
@@ -456,6 +528,9 @@ class WideDeep(TfBase, metaclass=ModelMeta):
                 self.data_info, sparse_indices, dense_values, feats
             )
 
+        # Get full user rating vectors for inference (without masking)
+        user_rating_vectors = get_user_rating_vectors_for_inference(self, user_indices)
+
         seqs, seq_len = get_cached_seqs(self, user_indices, repeat=False)
         feed_dict = get_feed_dict(
             model=self,
@@ -465,6 +540,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             dense_values=dense_values,
             user_interacted_seq=seqs,
             user_interacted_len=seq_len,
+            user_rating_vectors=user_rating_vectors,
             is_training=False,
         )
         proba = self.sess.run(self.proba_output, feed_dict)

@@ -63,11 +63,17 @@ class BaseCollator:
         self.user_consumed_set = None
         self.neg_probs = None
         self.np_rng = None
+        # User rating vector feature support
+        self.use_user_rating_vector = getattr(model, "use_user_rating_vector", False)
+        self.sparse_interaction = getattr(model, "sparse_interaction", None)
 
     def __call__(self, batch):
         sparse_batch = self.get_features(batch, FeatType.SPARSE)
         dense_batch = self.get_features(batch, FeatType.DENSE)
         seq_batch = self.get_seqs(batch["user"], batch["item"])
+        user_rating_vectors = self.get_user_rating_vectors(
+            batch["user"], batch["item"], mask_current_item=True
+        )
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
         elif self.separate_features:
@@ -81,6 +87,7 @@ class BaseCollator:
             sparse_indices=sparse_batch,
             dense_values=dense_batch,
             seqs=seq_batch,
+            user_rating_vectors=user_rating_vectors,
             backend=self.backend,
         )
         return batch_data
@@ -187,6 +194,44 @@ class BaseCollator:
             torch.manual_seed(seed)
             self.np_rng = np.random.default_rng(seed)
 
+    def get_user_rating_vectors(self, user_indices, item_indices, mask_current_item=True):
+        """Get user rating vectors for a batch of users.
+        
+        Parameters
+        ----------
+        user_indices : numpy.ndarray
+            Array of user indices for the batch.
+        item_indices : numpy.ndarray
+            Array of item indices for the batch.
+        mask_current_item : bool, default: True
+            If True, mask (set to 0) the rating for the current item in each
+            user's rating vector. This prevents data leakage during training.
+            
+        Returns
+        -------
+        numpy.ndarray or None
+            Array of shape [batch_size, n_items] containing user rating vectors,
+            or None if use_user_rating_vector is False.
+        """
+        if not self.use_user_rating_vector or self.sparse_interaction is None:
+            return None
+        
+        batch_size = len(user_indices)
+        # Get dense rating vectors for each user from sparse_interaction matrix
+        # sparse_interaction is a scipy.sparse.csr_matrix of shape [n_users, n_items]
+        user_rating_vectors = np.zeros((batch_size, self.n_items), dtype=np.float32)
+        
+        for i, (user_idx, item_idx) in enumerate(zip(user_indices, item_indices)):
+            if user_idx < self.sparse_interaction.shape[0]:
+                # Get the user's row from sparse matrix as dense array
+                user_rating_vectors[i] = self.sparse_interaction[user_idx].toarray().flatten()
+                
+                # Mask the current item's rating to prevent data leakage during training
+                if mask_current_item and item_idx < self.n_items:
+                    user_rating_vectors[i, item_idx] = 0.0
+        
+        return user_rating_vectors
+
 
 class SparseCollator(BaseCollator):
     def __init__(self, model, data_info, backend):
@@ -235,6 +280,9 @@ class PointwiseCollator(BaseCollator):
         sparse_batch = self.get_pointwise_feats(batch, FeatType.SPARSE, item_batch)
         dense_batch = self.get_pointwise_feats(batch, FeatType.DENSE, item_batch)
         seq_batch = self.get_seqs(user_batch, item_batch)
+        user_rating_vectors = self.get_user_rating_vectors(
+            user_batch, item_batch, mask_current_item=True
+        )
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
         elif self.separate_features:
@@ -248,6 +296,7 @@ class PointwiseCollator(BaseCollator):
             sparse_indices=sparse_batch,
             dense_values=dense_batch,
             seqs=seq_batch,
+            user_rating_vectors=user_rating_vectors,
             backend=self.backend,
         )
         return batch_data
@@ -857,6 +906,9 @@ class LazyCollator(BaseCollator):
             dense_batch = self._split_dense_features(dense_batch)
 
         seq_batch = self.get_seqs(user_indices, item_indices)
+        user_rating_vectors = self.get_user_rating_vectors(
+            user_indices, item_indices, mask_current_item=True
+        )
 
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
@@ -872,6 +924,7 @@ class LazyCollator(BaseCollator):
             sparse_indices=sparse_batch,
             dense_values=dense_batch,
             seqs=seq_batch,
+            user_rating_vectors=user_rating_vectors,
             backend=self.backend,
         )
 
@@ -929,6 +982,9 @@ class LazyPointwiseCollator(LazyCollator):
         sparse_batch, dense_batch = self._get_pointwise_feats_fast(user_batch, item_batch)
 
         seq_batch = self.get_seqs(user_batch, item_batch)
+        user_rating_vectors = self.get_user_rating_vectors(
+            user_batch, item_batch, mask_current_item=True
+        )
 
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
@@ -944,6 +1000,7 @@ class LazyPointwiseCollator(LazyCollator):
             sparse_indices=sparse_batch,
             dense_values=dense_batch,
             seqs=seq_batch,
+            user_rating_vectors=user_rating_vectors,
             backend=self.backend,
         )
 

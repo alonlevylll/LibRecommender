@@ -1,5 +1,6 @@
 import numpy as np
 
+from ..prediction.predict import get_user_rating_vectors_for_inference
 from ..prediction.preprocess import get_cached_dual_seq, get_cached_seqs, set_temp_feats
 from ..tfops.features import get_dual_seq_feed_dict, get_feed_dict
 
@@ -133,6 +134,15 @@ def process_tf_feat(model, user_ids, user_feats, seq, inner_id):
             model.data_info, sparse_indices, dense_values, user_feats
         )
 
+    # Get full user rating vectors for recommendation (without masking)
+    # Need to repeat each user's rating vector n_items times
+    user_rating_vectors = None
+    if getattr(model, "use_user_rating_vector", False):
+        user_rating_vecs_per_user = get_user_rating_vectors_for_inference(model, user_ids)
+        if user_rating_vecs_per_user is not None:
+            # Repeat each user's rating vector n_items times
+            user_rating_vectors = np.repeat(user_rating_vecs_per_user, model.n_items, axis=0)
+
     if model.model_name == "SIM":
         if seq is not None and len(seq) > 0:
             long_seq, long_len, short_seq, short_len = build_dual_seq(
@@ -168,6 +178,7 @@ def process_tf_feat(model, user_ids, user_feats, seq, inner_id):
             dense_values=dense_values,
             user_interacted_seq=seqs,
             user_interacted_len=seq_len,
+            user_rating_vectors=user_rating_vectors,
             is_training=False,
         )
 

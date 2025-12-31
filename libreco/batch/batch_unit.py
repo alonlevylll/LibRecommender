@@ -82,6 +82,7 @@ class PointwiseBatch:
         "sparse_indices",
         "dense_values",
         "seqs",
+        "user_rating_vectors",
     )
 
     users: Iterable[int]
@@ -90,6 +91,7 @@ class PointwiseBatch:
     sparse_indices: Optional[Iterable[int]]
     dense_values: Optional[Iterable[float]]
     seqs: Optional[SeqFeats]
+    user_rating_vectors: Optional[Iterable[float]]
     backend: InitVar[Backend]
 
     # todo: For now, no torch model uses sequence feature
@@ -102,6 +104,8 @@ class PointwiseBatch:
                 self.sparse_indices = torch.from_numpy(self.sparse_indices)
             if self.dense_values is not None:
                 self.dense_values = torch.from_numpy(self.dense_values)
+            if self.user_rating_vectors is not None:
+                self.user_rating_vectors = torch.from_numpy(self.user_rating_vectors)
 
     def to_device(self, device):  # pragma: no cover
         self.users = self.users.to(device)
@@ -111,6 +115,8 @@ class PointwiseBatch:
             self.sparse_indices = self.sparse_indices.to(device)
         if self.dense_values is not None:
             self.dense_values = self.dense_values.to(device)
+        if self.user_rating_vectors is not None:
+            self.user_rating_vectors = self.user_rating_vectors.to(device)
         return self
 
 
@@ -128,6 +134,8 @@ class PointwiseSepFeatBatch(PointwiseBatch):
                 self.sparse_indices.to_torch_tensor()
             if self.dense_values is not None:
                 self.dense_values.to_torch_tensor()
+            if self.user_rating_vectors is not None:
+                self.user_rating_vectors = torch.from_numpy(self.user_rating_vectors)
 
 
 @dataclass

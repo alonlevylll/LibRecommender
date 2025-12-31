@@ -102,16 +102,34 @@ def _convert_labels_to_indices(model, labels):
         Integer class indices.
     """
     import numpy as np
-    indices = np.zeros(len(labels), dtype=np.int32)
-    for i, label in enumerate(labels):
-        # Find closest rating label if exact match not found
-        if label in model.rating_label_to_index:
-            indices[i] = model.rating_label_to_index[label]
-        else:
-            # Find the closest rating label
-            closest_idx = np.argmin(np.abs(model.rating_labels - label))
-            indices[i] = closest_idx
+    labels_arr = np.asarray(labels)
+    # Vectorized: find the closest rating class for each label
+    # rating_labels shape: (n_classes,), labels_arr shape: (batch_size,)
+    # Compute absolute difference and find argmin
+    diff = np.abs(labels_arr[:, np.newaxis] - model.rating_labels[np.newaxis, :])
+    indices = np.argmin(diff, axis=1).astype(np.int32)
     return indices
+
+
+def _is_softmax_rating_model(model):
+    """Check if model uses softmax loss for rating prediction.
+    
+    This is a strict check to ensure we only convert labels for models
+    that are explicitly configured for softmax rating classification.
+    """
+    # Must have loss_type attribute set to "softmax"
+    if not hasattr(model, "loss_type") or model.loss_type != "softmax":
+        return False
+    # Must have rating task
+    if not hasattr(model, "task") or model.task != "rating":
+        return False
+    # Must have rating_label_to_index mapping set up
+    if not hasattr(model, "rating_label_to_index") or model.rating_label_to_index is None:
+        return False
+    # Must have rating_labels array
+    if not hasattr(model, "rating_labels") or model.rating_labels is None:
+        return False
+    return True
 
 
 def _pointwise_feed_dict(model, data: PointwiseBatch, is_training):
@@ -122,12 +140,7 @@ def _pointwise_feed_dict(model, data: PointwiseBatch, is_training):
         feed_dict.update({model.item_indices: data.items})
     if hasattr(model, "labels"):
         # For softmax loss in rating task, convert labels to class indices
-        if (
-            hasattr(model, "loss_type")
-            and model.loss_type == "softmax"
-            and hasattr(model, "rating_label_to_index")
-            and model.rating_label_to_index is not None
-        ):
+        if _is_softmax_rating_model(model):
             label_indices = _convert_labels_to_indices(model, data.labels)
             feed_dict.update({model.labels: label_indices})
         else:
@@ -145,6 +158,14 @@ def _pointwise_feed_dict(model, data: PointwiseBatch, is_training):
                 model.user_interacted_len: data.seqs.interacted_len,
             }
         )
+    # User rating vector feature
+    if (
+        hasattr(model, "use_user_rating_vector")
+        and model.use_user_rating_vector
+        and hasattr(data, "user_rating_vectors")
+        and data.user_rating_vectors is not None
+    ):
+        feed_dict.update({model.user_rating_vector: data.user_rating_vectors})
     return feed_dict
 
 
