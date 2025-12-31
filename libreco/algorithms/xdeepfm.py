@@ -211,7 +211,10 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
         x_{h,*}^{k} = sum_{i=1}^{H_{k-1}} sum_{j=1}^{m} W_{i,j}^{k,h} (X_{i,*}^{k-1} \circ x_{j,*}^0)
         
         where H_k is the number of feature vectors in the k-th layer,
-        and \circ denotes the Hadamard product.
+        m is the number of original fields, and \circ denotes the Hadamard product.
+        
+        The key insight is that for each embedding dimension d, we apply the same
+        weight matrix W to transform H_{k-1} * m feature interactions to H_k outputs.
         
         Args:
             input_features: Tensor of shape [batch_size, field_num, embed_size]
@@ -221,100 +224,86 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
             all CIN layer sizes (or half for non-direct connections)
         """
         batch_size = tf.shape(input_features)[0]
-        field_num = input_features.get_shape().as_list()[1]
-        embed_size = input_features.get_shape().as_list()[2]
+        field_num = input_features.get_shape().as_list()[1]  # m = original field count
+        embed_size = input_features.get_shape().as_list()[2]  # D = embedding dimension
         
-        # Track field numbers for each layer
-        field_nums = [field_num]
-        hidden_layers = [input_features]
+        # X^0: [batch, m, D] - the original field embeddings
+        x0 = input_features
+        
+        # Track number of feature maps in each hidden layer
+        hidden_nn_layers = [x0]
         final_results = []
         
-        # Create Conv1D layers for each CIN layer
         with tf.variable_scope("cin", reuse=tf.AUTO_REUSE):
-            for i, layer_size in enumerate(self.cin_layer_size):
-                # Compute outer product: z_i = X_{k-1} \circ X_0
-                # Using einsum: "bhd,bmd->bhmd" 
-                # hidden_layers[-1]: [batch_size, H_{k-1}, embed_size]
-                # hidden_layers[0]: [batch_size, m, embed_size] where m=field_num
-                # Result: [batch_size, H_{k-1}, m, embed_size]
-                z_i = tf.einsum(
-                    "bhd,bmd->bhmd",
-                    hidden_layers[-1],
-                    hidden_layers[0],
-                )
+            for layer_idx, layer_size in enumerate(self.cin_layer_size):
+                # Get previous layer: X^{k-1} of shape [batch, H_{k-1}, D]
+                x_prev = hidden_nn_layers[-1]
+                h_prev = x_prev.get_shape().as_list()[1]  # H_{k-1}
                 
-                # Reshape for Conv1D: [batch_size, H_{k-1} * m, embed_size]
-                z_i_reshaped = tf.reshape(
-                    z_i,
-                    [batch_size, field_nums[i] * field_nums[0], embed_size]
-                )
+                # Compute Z^k = X^{k-1} ⊙ X^0 (element-wise product)
+                # x_prev: [batch, H_{k-1}, D]
+                # x0: [batch, m, D]
+                # z_k: [batch, H_{k-1}, m, D] via outer Hadamard product
+                # z_k[b, i, j, d] = x_prev[b, i, d] * x0[b, j, d]
+                z_k = tf.einsum("bid,bjd->bijd", x_prev, x0)  # [batch, H_{k-1}, m, D]
                 
-                # Apply Conv1D with kernel_size=1
-                # Input: [batch_size, H_{k-1} * m, embed_size]
-                # Output: [batch_size, H_{k-1} * m, layer_size]
-                z_i_conv = tf.layers.conv1d(
-                    inputs=z_i_reshaped,
-                    filters=layer_size,
+                # Reshape Z to [batch, H_{k-1} * m, D]
+                z_k_flat = tf.reshape(z_k, [batch_size, h_prev * field_num, embed_size])
+                
+                # Now we need to apply weights W^k of shape [H_k, H_{k-1} * m]
+                # For each embedding dimension d: X^k[:, :, d] = W @ Z[:, :, d]
+                # Using conv1d: transpose to [batch, D, H_{k-1} * m], apply conv, transpose back
+                
+                # Transpose: [batch, D, H_{k-1} * m]
+                z_k_transposed = tf.transpose(z_k_flat, [0, 2, 1])
+                
+                # Apply conv1d: maps H_{k-1} * m channels to H_k channels
+                # Input: [batch, D, H_{k-1} * m]
+                # Output: [batch, D, H_k]
+                x_k_transposed = tf.layers.conv1d(
+                    inputs=z_k_transposed,
+                    filters=layer_size,  # H_k
                     kernel_size=1,
+                    activation=tf.nn.relu,
                     kernel_initializer=tf.glorot_uniform_initializer(),
                     kernel_regularizer=self.reg,
-                    name=f"cin_conv_{i}",
+                    name=f"cin_conv_{layer_idx}",
                 )
                 
-                # Apply activation
-                output = tf.nn.relu(z_i_conv)  # [batch_size, H_{k-1} * m, layer_size]
+                # Transpose back to [batch, H_k, D]
+                x_k = tf.transpose(x_k_transposed, [0, 2, 1])
                 
                 # Handle direct vs split connections
                 if self.cin_direct:
-                    direct_connect = output  # [batch_size, H_{k-1} * m, layer_size]
-                    next_hidden = output
-                    field_nums.append(layer_size)
+                    # Direct: all feature maps go to both output and next layer
+                    direct_connect = x_k  # [batch, H_k, D]
+                    next_hidden = x_k     # [batch, H_k, D]
                 else:
-                    if i != len(self.cin_layer_size) - 1:
-                        # Split in half along the filter dimension
+                    if layer_idx != len(self.cin_layer_size) - 1:
+                        # Split feature maps in half along axis=1 (H_k dimension)
                         split_size = layer_size // 2
                         direct_connect, next_hidden = tf.split(
-                            output, [split_size, split_size], axis=2
+                            x_k, [split_size, split_size], axis=1
                         )
-                        field_nums.append(split_size)
+                        # direct_connect: [batch, split_size, D]
+                        # next_hidden: [batch, split_size, D]
                     else:
-                        # Last layer: use all
-                        direct_connect = output
+                        # Last layer: all go to output, none to next layer
+                        direct_connect = x_k
                         next_hidden = None
-                        field_nums.append(layer_size)
                 
-                # Sum pooling over the H_{k-1} * m dimension
-                # direct_connect: [batch_size, H_{k-1} * m, layer_size]
-                # Sum over axis=1: [batch_size, layer_size]
-                pooled = tf.reduce_sum(direct_connect, axis=1)
+                # Sum pooling: reduce over embedding dimension D
+                # direct_connect: [batch, H_k or split_size, D]
+                # Output: [batch, H_k or split_size]
+                pooled = tf.reduce_sum(direct_connect, axis=2)
                 final_results.append(pooled)
                 
+                # Add next_hidden to layers list for next iteration
                 if next_hidden is not None:
-                    # Reshape next_hidden for next iteration
-                    # next_hidden: [batch_size, H_{k-1} * m, H_k]
-                    # We need to reshape to [batch_size, H_k, embed_size]
-                    # This requires projecting back to embed_size dimension
-                    # Actually, we should maintain the structure: [batch_size, H_k, embed_size]
-                    # But Conv1D output is [batch_size, H_{k-1} * m, H_k]
-                    # We need to reshape to [batch_size, H_k, embed_size]
-                    # Option: use another Conv1D to project, or reshape differently
-                    # Looking at PyTorch code, it seems next_hidden should be [batch_size, H_k, embed_size]
-                    # So we need to project the [batch_size, H_{k-1} * m, H_k] to [batch_size, H_k, embed_size]
-                    # Actually, let's transpose and use another conv to get back to embed_size
-                    next_hidden_transposed = tf.transpose(next_hidden, [0, 2, 1])  # [batch_size, H_k, H_{k-1} * m]
-                    # Project to embed_size
-                    next_hidden_proj = tf.layers.conv1d(
-                        inputs=next_hidden_transposed,
-                        filters=embed_size,
-                        kernel_size=1,
-                        kernel_initializer=tf.glorot_uniform_initializer(),
-                        kernel_regularizer=self.reg,
-                        name=f"cin_proj_{i}",
-                    )  # [batch_size, H_k, embed_size]
-                    hidden_layers.append(next_hidden_proj)
+                    hidden_nn_layers.append(next_hidden)
         
-        # Concatenate all pooled results
-        result = tf.concat(final_results, axis=1)  # [batch_size, final_len]
+        # Concatenate all pooled results: [batch, sum(layer_sizes) or sum(split_sizes)]
+        result = tf.concat(final_results, axis=1)
         return result
 
     def _build_user_item(self):
@@ -376,17 +365,15 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
             initializer=tf.glorot_uniform_initializer(),
             regularizer=self.reg,
         )
-        # Reshape for CIN: [batch_size, field_num, embed_size]
-        # For sparse features, we need to handle multi-sparse case
-        if self.multi_sparse_combiner:
-            # Multi-sparse features are already combined, reshape appropriately
-            sparse_cin_embed = pairwise_sparse_embed
-            if len(sparse_cin_embed.get_shape()) == 2:
-                sparse_cin_embed = sparse_cin_embed[:, tf.newaxis, :]
-        else:
-            sparse_cin_embed = pairwise_sparse_embed
-            if len(sparse_cin_embed.get_shape()) == 2:
-                sparse_cin_embed = sparse_cin_embed[:, tf.newaxis, :]
+        
+        # For CIN: we need [batch_size, num_fields, embed_size]
+        # pairwise_sparse_embed is [batch_size, true_sparse_field_size * embed_size] after flatten
+        # or [batch_size, true_sparse_field_size, embed_size] before flatten
+        # We need to reshape it properly for CIN
+        sparse_cin_embed = tf.reshape(
+            pairwise_sparse_embed,
+            [-1, self.true_sparse_field_size, self.embed_size]
+        )
         
         deep_sparse_embed = tf.keras.layers.Flatten()(pairwise_sparse_embed)
         self.linear_embed.append(linear_sparse_embed)
@@ -411,10 +398,13 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
             initializer=tf.glorot_uniform_initializer(),
             regularizer=self.reg,
         )
-        # Reshape for CIN: [batch_size, field_num, embed_size]
-        dense_cin_embed = pairwise_dense_embed
-        if len(dense_cin_embed.get_shape()) == 2:
-            dense_cin_embed = dense_cin_embed[:, tf.newaxis, :]
+        
+        # For CIN: we need [batch_size, num_fields, embed_size]
+        # pairwise_dense_embed should be [batch_size, dense_field_size, embed_size]
+        dense_cin_embed = tf.reshape(
+            pairwise_dense_embed,
+            [-1, self.dense_field_size, self.embed_size]
+        )
         
         deep_dense_embed = tf.keras.layers.Flatten()(pairwise_dense_embed)
         self.linear_embed.append(linear_dense_embed)
