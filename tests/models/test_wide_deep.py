@@ -123,3 +123,71 @@ def test_wide_deep_multi_sparse(prepare_multi_sparse_data):
     loaded_model, loaded_data_info = save_load_model(WideDeep, model, data_info)
     ptest_preds(loaded_model, task, pd_data, with_feats=True)
     ptest_recommends(loaded_model, loaded_data_info, pd_data, with_feats=True)
+
+
+def test_wide_deep_softmax_loss(feat_data_small):
+    """Test WideDeep with softmax loss for rating task.
+    
+    Rating labels are automatically extracted from training data.
+    """
+    tf.compat.v1.reset_default_graph()
+    pd_data, train_data, eval_data, data_info = feat_data_small
+    
+    model = WideDeep(
+        task="rating",
+        data_info=data_info,
+        loss_type="softmax",
+        embed_size=4,
+        n_epochs=2,
+        lr={"wide": 0.01, "deep": 3e-4},
+        batch_size=80,
+        hidden_units=(16, 8),
+    )
+    model.fit(
+        train_data,
+        neg_sampling=False,
+        verbose=2,
+        shuffle=True,
+        eval_data=eval_data,
+        metrics=get_metrics("rating"),
+    )
+    
+    # Rating labels should be auto-detected from training data
+    assert model.rating_labels is not None
+    assert model.n_rating_classes > 0
+    n_classes = model.n_rating_classes
+    
+    # Test predictions (should use weighted average)
+    ptest_preds(model, "rating", pd_data, with_feats=True)
+    ptest_recommends(model, data_info, pd_data, with_feats=True)
+    
+    # Test predict_proba method
+    user_id = pd_data["user"].iloc[0]
+    item_id = pd_data["item"].iloc[0]
+    proba_result = model.predict_proba(user_id, item_id)
+    
+    assert "labels" in proba_result
+    assert "probabilities" in proba_result
+    assert len(proba_result["labels"]) == n_classes
+    assert proba_result["probabilities"].shape == (1, n_classes)
+    # Probabilities should sum to 1
+    assert abs(proba_result["probabilities"].sum() - 1.0) < 1e-5
+    
+    # Test batch predict_proba
+    users = pd_data["user"].iloc[:5].tolist()
+    items = pd_data["item"].iloc[:5].tolist()
+    batch_proba = model.predict_proba(users, items)
+    assert batch_proba["probabilities"].shape == (5, n_classes)
+
+
+def test_wide_deep_softmax_validation():
+    """Test validation for softmax loss configuration."""
+    tf.compat.v1.reset_default_graph()
+    
+    # Test that softmax requires rating task
+    with pytest.raises(ValueError, match="Softmax loss is only supported for rating task"):
+        WideDeep(
+            task="ranking",
+            data_info=None,
+            loss_type="softmax",
+        )

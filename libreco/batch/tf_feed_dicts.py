@@ -86,6 +86,34 @@ def _pairwise_feed_dict(model, data: PairwiseBatch, is_training):
     return feed_dict
 
 
+def _convert_labels_to_indices(model, labels):
+    """Convert rating labels to class indices for softmax loss.
+    
+    Parameters
+    ----------
+    model : object
+        Model with rating_label_to_index mapping.
+    labels : array_like
+        Rating labels to convert.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Integer class indices.
+    """
+    import numpy as np
+    indices = np.zeros(len(labels), dtype=np.int32)
+    for i, label in enumerate(labels):
+        # Find closest rating label if exact match not found
+        if label in model.rating_label_to_index:
+            indices[i] = model.rating_label_to_index[label]
+        else:
+            # Find the closest rating label
+            closest_idx = np.argmin(np.abs(model.rating_labels - label))
+            indices[i] = closest_idx
+    return indices
+
+
 def _pointwise_feed_dict(model, data: PointwiseBatch, is_training):
     feed_dict = dict()
     if hasattr(model, "user_indices"):
@@ -93,7 +121,17 @@ def _pointwise_feed_dict(model, data: PointwiseBatch, is_training):
     if hasattr(model, "item_indices"):
         feed_dict.update({model.item_indices: data.items})
     if hasattr(model, "labels"):
-        feed_dict.update({model.labels: data.labels})
+        # For softmax loss in rating task, convert labels to class indices
+        if (
+            hasattr(model, "loss_type")
+            and model.loss_type == "softmax"
+            and hasattr(model, "rating_label_to_index")
+            and model.rating_label_to_index is not None
+        ):
+            label_indices = _convert_labels_to_indices(model, data.labels)
+            feed_dict.update({model.labels: label_indices})
+        else:
+            feed_dict.update({model.labels: data.labels})
     if hasattr(model, "is_training"):
         feed_dict.update({model.is_training: is_training})
     if hasattr(model, "sparse") and model.sparse:

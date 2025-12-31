@@ -1,4 +1,6 @@
 """Implementation of Wide & Deep."""
+import numpy as np
+
 from ..bases import ModelMeta, TfBase
 from ..feature.multi_sparse import true_sparse_field_size
 from ..layers import dense_nn, embedding_lookup, tf_dense
@@ -25,9 +27,17 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         Recommendation task. See :ref:`Task`.
     data_info : :class:`~libreco.data.DataInfo` object
         Object that contains useful information for training and inference.
-    loss_type : {'cross_entropy', 'focal', 'wmse'}, default: 'cross_entropy'
-        Loss for model training. For rating task, 'wmse' (Weighted Mean Squared Error)
-        can be used to weight items by their frequency in the training data.
+    loss_type : {'cross_entropy', 'focal', 'wmse', 'softmax'}, default: 'cross_entropy'
+        Loss for model training. For rating task:
+
+        - 'wmse' (Weighted Mean Squared Error) can be used to weight items by
+          their frequency in the training data.
+        - 'softmax' treats rating prediction as a multi-class classification problem.
+          The output layer will have N neurons (one per rating class), and softmax
+          is applied to get probabilities. The final prediction is a weighted average
+          of class probabilities. Rating labels are automatically extracted from
+          the unique values in the training data labels.
+
     embed_size: int, default: 16
         Vector size of embeddings.
     n_epochs: int, default: 10
@@ -149,11 +159,25 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         if self.dense:
             self.dense_field_size = dense_field_size(data_info)
 
+        # Softmax loss validation (rating labels will be extracted from train_data in fit())
+        if loss_type == "softmax" and task != "rating":
+            raise ValueError("Softmax loss is only supported for rating task.")
+
+        # Will be set in fit() when loss_type="softmax"
+        self.rating_labels = None
+        self.n_rating_classes = None
+        self.rating_label_to_index = None
+
     def build_model(self):
         tf.set_random_seed(self.seed)
-        self.labels = tf.placeholder(tf.float32, shape=[None])
         self.is_training = tf.placeholder_with_default(False, shape=[])
         self.wide_embed, self.deep_embed = [], []
+
+        # For softmax loss, labels are class indices; otherwise float ratings
+        if self.loss_type == "softmax":
+            self.labels = tf.placeholder(tf.int32, shape=[None])
+        else:
+            self.labels = tf.placeholder(tf.float32, shape=[None])
 
         self._build_user_item()
         if self.sparse:
@@ -162,8 +186,6 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             self._build_dense()
 
         wide_embed = tf.concat(self.wide_embed, axis=1)
-        wide_term = tf_dense(units=1, name="wide_term")(wide_embed)
-
         deep_embed = tf.concat(self.deep_embed, axis=1)
         deep_layer = dense_nn(
             deep_embed,
@@ -173,8 +195,32 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             is_training=self.is_training,
             name="deep",
         )
-        deep_term = tf_dense(units=1, name="deep_term")(deep_layer)
-        self.output = tf.squeeze(tf.add(wide_term, deep_term))
+
+        if self.loss_type == "softmax":
+            # For softmax loss: output layer has n_rating_classes neurons
+            wide_term = tf_dense(units=self.n_rating_classes, name="wide_term")(
+                wide_embed
+            )
+            deep_term = tf_dense(units=self.n_rating_classes, name="deep_term")(
+                deep_layer
+            )
+            # Logits for softmax
+            self.logits = tf.add(wide_term, deep_term, name="logits")
+            # Probabilities for each rating class
+            self.proba_output = tf.nn.softmax(self.logits, name="proba_output")
+            # Rating labels as tensor for weighted average computation
+            self.rating_labels_tf = tf.constant(
+                self.rating_labels, dtype=tf.float32, name="rating_labels"
+            )
+            # Predicted rating = weighted average of labels by probabilities
+            self.output = tf.reduce_sum(
+                self.proba_output * self.rating_labels_tf, axis=1, name="output"
+            )
+        else:
+            wide_term = tf_dense(units=1, name="wide_term")(wide_embed)
+            deep_term = tf_dense(units=1, name="deep_term")(deep_layer)
+            self.output = tf.squeeze(tf.add(wide_term, deep_term))
+
         self.serving_topk = self.build_topk(self.output)
         count_params()
 
@@ -272,3 +318,164 @@ class WideDeep(TfBase, metaclass=ModelMeta):
                 "wide and deep parts, e.g. {'wide': 0.01, 'deep': 1e-4}"
             )
             return lr
+
+    def fit(
+        self,
+        train_data,
+        neg_sampling,
+        verbose=1,
+        shuffle=True,
+        eval_data=None,
+        metrics=None,
+        k=10,
+        eval_batch_size=8192,
+        eval_user_num=None,
+        num_workers=0,
+    ):
+        """Fit Wide & Deep model on the training data.
+
+        For softmax loss, rating labels are automatically extracted from the
+        unique values in the training data labels.
+
+        Parameters
+        ----------
+        train_data : :class:`~libreco.data.TransformedSet` object
+            Data object used for training.
+        neg_sampling : bool
+            Whether to perform negative sampling for training or evaluating data.
+        verbose : int, default: 1
+            Print verbosity.
+        shuffle : bool, default: True
+            Whether to shuffle the training data.
+        eval_data : :class:`~libreco.data.TransformedSet` object, default: None
+            Data object used for evaluating.
+        metrics : list or None, default: None
+            List of metrics for evaluating.
+        k : int, default: 10
+            Parameter of metrics, e.g. recall at k, ndcg at k
+        eval_batch_size : int, default: 8192
+            Batch size for evaluating.
+        eval_user_num : int or None, default: None
+            Number of users for evaluating.
+        num_workers : int, default: 0
+            How many subprocesses to use for training data loading.
+        """
+        # Extract rating labels from training data for softmax loss
+        if self.loss_type == "softmax" and self.rating_labels is None:
+            self._setup_rating_labels(train_data)
+
+        # Call parent fit()
+        super().fit(
+            train_data,
+            neg_sampling,
+            verbose,
+            shuffle,
+            eval_data,
+            metrics,
+            k,
+            eval_batch_size,
+            eval_user_num,
+            num_workers,
+        )
+
+    def _setup_rating_labels(self, train_data):
+        """Extract unique rating labels from training data for softmax loss.
+
+        Parameters
+        ----------
+        train_data : :class:`~libreco.data.TransformedSet` object
+            Training data containing labels.
+        """
+        unique_labels = np.unique(train_data.labels)
+        self.rating_labels = np.array(sorted(unique_labels), dtype=np.float32)
+        self.n_rating_classes = len(self.rating_labels)
+        self.rating_label_to_index = {
+            label: idx for idx, label in enumerate(self.rating_labels)
+        }
+        print(
+            f"Softmax loss: detected {self.n_rating_classes} rating classes "
+            f"from training data: {self.rating_labels.tolist()}"
+        )
+
+    def predict_proba(self, user, item, feats=None, cold_start="average", inner_id=False):
+        """Get probability distribution over rating classes.
+
+        This method is only available when ``loss_type='softmax'``.
+
+        Parameters
+        ----------
+        user : int or str or array_like
+            User id or batch of user ids.
+        item : int or str or array_like
+            Item id or batch of item ids.
+        feats : dict or None, default: None
+            Extra features used in prediction.
+        cold_start : {'popular', 'average'}, default: 'average'
+            Cold start strategy.
+        inner_id : bool, default: False
+            Whether to use inner_id defined in `libreco`.
+
+        Returns
+        -------
+        dict
+            Dictionary with:
+            - 'labels': numpy array of rating labels
+            - 'probabilities': numpy array of shape (n_samples, n_classes) with
+              probability for each rating class
+
+        Raises
+        ------
+        ValueError
+            If called on a model not using softmax loss.
+        """
+        if self.loss_type != "softmax":
+            raise ValueError(
+                "predict_proba is only available when loss_type='softmax'. "
+                f"Current loss_type is '{self.loss_type}'."
+            )
+
+        from ..prediction.preprocess import convert_id, get_cached_seqs, get_original_feats, set_temp_feats
+        from ..tfops.features import get_feed_dict
+        from ..utils.validate import check_unknown
+
+        user, item = convert_id(self, user, item, inner_id)
+        unknown_num, unknown_index, user, item = check_unknown(self, user, item)
+        has_sparse = self.sparse if hasattr(self, "sparse") else None
+        has_dense = self.dense if hasattr(self, "dense") else None
+        (
+            user_indices,
+            item_indices,
+            sparse_indices,
+            dense_values,
+        ) = get_original_feats(self.data_info, user, item, has_sparse, has_dense)
+
+        if feats is not None:
+            assert isinstance(feats, dict), "`feats` must be `dict`."
+            assert len(user_indices) == 1, "Predict with feats only supports single user."
+            sparse_indices, dense_values = set_temp_feats(
+                self.data_info, sparse_indices, dense_values, feats
+            )
+
+        seqs, seq_len = get_cached_seqs(self, user_indices, repeat=False)
+        feed_dict = get_feed_dict(
+            model=self,
+            user_indices=user_indices,
+            item_indices=item_indices,
+            sparse_indices=sparse_indices,
+            dense_values=dense_values,
+            user_interacted_seq=seqs,
+            user_interacted_len=seq_len,
+            is_training=False,
+        )
+        proba = self.sess.run(self.proba_output, feed_dict)
+
+        # Handle unknown users/items by returning uniform probabilities
+        if unknown_num > 0 and cold_start == "popular":
+            uniform_proba = np.ones(self.n_rating_classes) / self.n_rating_classes
+            for i in unknown_index:
+                proba[i] = uniform_proba
+
+        return {
+            "labels": self.rating_labels.copy(),
+            "probabilities": proba,
+        }

@@ -36,6 +36,26 @@ def weighted_mse_loss(labels, predictions, item_indices, item_weights):
     return tf.div_no_nan(sum_weighted_squared_error, sum_weights)
 
 
+def rating_softmax_cross_entropy_loss(labels, logits):
+    """Compute softmax cross-entropy loss for rating classification.
+
+    Parameters
+    ----------
+    labels : tf.Tensor
+        Integer class indices (0 to n_classes-1).
+    logits : tf.Tensor
+        Logits for each class, shape [batch_size, n_classes].
+
+    Returns
+    -------
+    tf.Tensor
+        Mean softmax cross-entropy loss.
+    """
+    return tf.reduce_mean(
+        tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits)
+    )
+
+
 def choose_tf_loss(model, task, loss_type):
     if task == "rating":
         if loss_type == "wmse":
@@ -55,6 +75,17 @@ def choose_tf_loss(model, task, loss_type):
                 predictions=model.output,
                 item_indices=model.item_indices,
                 item_weights=model.item_weights_tf,
+            )
+        elif loss_type == "softmax":
+            # Check if model has logits for softmax loss
+            if not hasattr(model, "logits"):
+                raise ValueError(
+                    "Model must have 'logits' tensor for softmax loss. "
+                    "Make sure the model is configured with loss_type='softmax'."
+                )
+            loss = rating_softmax_cross_entropy_loss(
+                labels=model.labels,
+                logits=model.logits,
             )
         else:
             loss = tf.losses.mean_squared_error(
