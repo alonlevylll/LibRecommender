@@ -128,6 +128,7 @@ class TorchTrainer(BaseTrainer):
                 print_metrics(
                     model=self.model,
                     neg_sampling=neg_sampling,
+                    train_data=train_data,
                     eval_data=eval_data,
                     metrics=metrics,
                     eval_batch_size=eval_batch_size,
