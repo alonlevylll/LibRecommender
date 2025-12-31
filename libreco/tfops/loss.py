@@ -29,8 +29,11 @@ def weighted_mse_loss(labels, predictions, item_indices, item_weights):
     # Compute weighted squared error
     weighted_squared_error = batch_weights * squared_error
     
-    # Return mean of weighted squared errors
-    return tf.reduce_mean(weighted_squared_error)
+    # Return weighted mean: sum(weights * squared_errors) / sum(weights)
+    # This normalizes by the sum of weights to keep scale similar to regular MSE
+    sum_weighted_squared_error = tf.reduce_sum(weighted_squared_error)
+    sum_weights = tf.reduce_sum(batch_weights)
+    return tf.div_no_nan(sum_weighted_squared_error, sum_weights)
 
 
 def choose_tf_loss(model, task, loss_type):
