@@ -42,10 +42,16 @@ def get_user_rating_vectors_for_inference(model, user_indices):
     
     user_rating_vectors = np.zeros((batch_size, n_items), dtype=np.float32)
     
+    # The sparse matrix might have different shape than n_items
+    sparse_n_rows = model.sparse_interaction.shape[0]
+    copy_cols = min(model.sparse_interaction.shape[1], n_items)
+    
     for i, user_idx in enumerate(user_indices):
-        if user_idx < model.sparse_interaction.shape[0]:
+        if user_idx < sparse_n_rows:
             # Get the user's row from sparse matrix as dense array
-            user_rating_vectors[i] = model.sparse_interaction[user_idx].toarray().flatten()
+            user_row = model.sparse_interaction[user_idx].toarray().flatten()
+            # Copy only the valid range (handle shape mismatch)
+            user_rating_vectors[i, :copy_cols] = user_row[:copy_cols]
     
     return user_rating_vectors
 

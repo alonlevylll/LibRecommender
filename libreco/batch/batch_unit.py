@@ -88,11 +88,11 @@ class PointwiseBatch:
     users: Iterable[int]
     items: Iterable[int]
     labels: Iterable[float]
-    sparse_indices: Optional[Iterable[int]]
-    dense_values: Optional[Iterable[float]]
-    seqs: Optional[SeqFeats]
-    user_rating_vectors: Optional[Iterable[float]]
-    backend: InitVar[Backend]
+    sparse_indices: Optional[Iterable[int]] = None
+    dense_values: Optional[Iterable[float]] = None
+    seqs: Optional[SeqFeats] = None
+    user_rating_vectors: Optional[Iterable[float]] = None
+    backend: InitVar[Backend] = None
 
     # todo: For now, no torch model uses sequence feature
     def __post_init__(self, backend):
@@ -122,8 +122,8 @@ class PointwiseBatch:
 
 @dataclass
 class PointwiseSepFeatBatch(PointwiseBatch):
-    sparse_indices: Optional[PairFeats[int]]
-    dense_values: Optional[PairFeats[float]]
+    sparse_indices: Optional[PairFeats[int]] = None
+    dense_values: Optional[PairFeats[float]] = None
 
     def __post_init__(self, backend):
         if backend is Backend.TORCH:
@@ -140,7 +140,7 @@ class PointwiseSepFeatBatch(PointwiseBatch):
 
 @dataclass
 class PointwiseDualSeqBatch(PointwiseBatch):  # used in SIM
-    seqs: Optional[DualSeqFeats]
+    seqs: Optional[DualSeqFeats] = None
 
 
 @dataclass

@@ -80,10 +80,15 @@ class WideDeep(TfBase, metaclass=ModelMeta):
 
     multi_sparse_combiner : {'normal', 'mean', 'sum', 'sqrtn'}, default: 'sqrtn'
         Options for combining `multi_sparse` features.
-    use_user_rating_vector : bool, default: False
+    use_user_rating_vector : bool or str, default: False
         Whether to use user's rating history as an interaction-based dense feature.
         During training, the rating for the current item is masked (set to 0) to prevent
         data leakage. During inference, the full rating vector is used.
+        
+        - ``False``: Disabled (default)
+        - ``True`` or ``'both'``: Use in both wide and deep parts
+        - ``'wide'``: Use only in wide part (simpler, less prone to overfitting)
+        - ``'deep'``: Use only in deep part
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -194,7 +199,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             self._build_sparse()
         if self.dense:
             self._build_dense()
-        if self.use_user_rating_vector:
+        if self.use_user_rating_vector:  # True, 'both', 'wide', or 'deep'
             self._build_user_rating_vector()
 
         wide_embed = tf.concat(self.wide_embed, axis=1)
@@ -328,11 +333,16 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         masked (set to 0) to prevent data leakage. During inference, the full 
         rating vector is used.
         
-        To avoid parameter explosion and overfitting:
-        - Wide part: single weighted sum (1 parameter per item)
-        - Deep part: compressed projection to embed_size (n_items × embed_size params)
-        - L2 normalization applied to reduce scale sensitivity
+        The use_user_rating_vector parameter controls which parts use this feature:
+        - True or 'both': wide and deep parts
+        - 'wide': only wide part (simpler, less prone to overfitting)
+        - 'deep': only deep part
         """
+        # Determine which parts to use
+        mode = self.use_user_rating_vector
+        use_wide = mode in (True, 'both', 'wide')
+        use_deep = mode in (True, 'both', 'deep')
+        
         # Placeholder for user rating vector [batch_size, n_items]
         self.user_rating_vector = tf.placeholder(
             tf.float32, shape=[None, self.n_items], name="user_rating_vector"
@@ -348,32 +358,33 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         )
         
         with tf.variable_scope("embedding"):
-            # Wide part: weighted sum of all normalized ratings -> scalar per sample
-            # Shape: [n_items] -> learns importance weight per item
-            wide_rating_var = tf.get_variable(
-                name="rating_vector_wide_var",
-                shape=[self.n_items],
-                initializer=tf.glorot_uniform_initializer(),
-                regularizer=self.reg,
-            )
-            # [batch, n_items] * [n_items] -> [batch, n_items] -> sum -> [batch, 1]
-            wide_rating_embed = tf.reduce_sum(
-                rating_vector_norm * wide_rating_var, axis=1, keepdims=True
-            )
+            if use_wide:
+                # Wide part: weighted sum of all normalized ratings -> scalar per sample
+                # Shape: [n_items] -> learns importance weight per item
+                wide_rating_var = tf.get_variable(
+                    name="rating_vector_wide_var",
+                    shape=[self.n_items],
+                    initializer=tf.glorot_uniform_initializer(),
+                    regularizer=self.reg,
+                )
+                # [batch, n_items] * [n_items] -> [batch, n_items] -> sum -> [batch, 1]
+                wide_rating_embed = tf.reduce_sum(
+                    rating_vector_norm * wide_rating_var, axis=1, keepdims=True
+                )
+                self.wide_embed.append(wide_rating_embed)
             
-            # Deep part: single projection matrix to compress to embed_size
-            # Shape: [n_items, embed_size] -> projects entire rating vector to embed_size
-            deep_rating_var = tf.get_variable(
-                name="rating_vector_deep_var",
-                shape=[self.n_items, self.embed_size],
-                initializer=tf.glorot_uniform_initializer(),
-                regularizer=self.reg,
-            )
-            # [batch, n_items] @ [n_items, embed_size] -> [batch, embed_size]
-            deep_rating_embed = tf.matmul(rating_vector_norm, deep_rating_var)
-        
-        self.wide_embed.append(wide_rating_embed)
-        self.deep_embed.append(deep_rating_embed)
+            if use_deep:
+                # Deep part: single projection matrix to compress to embed_size
+                # Shape: [n_items, embed_size] -> projects entire rating vector to embed_size
+                deep_rating_var = tf.get_variable(
+                    name="rating_vector_deep_var",
+                    shape=[self.n_items, self.embed_size],
+                    initializer=tf.glorot_uniform_initializer(),
+                    regularizer=self.reg,
+                )
+                # [batch, n_items] @ [n_items, embed_size] -> [batch, embed_size]
+                deep_rating_embed = tf.matmul(rating_vector_norm, deep_rating_var)
+                self.deep_embed.append(deep_rating_embed)
 
     @staticmethod
     def check_lr(lr):

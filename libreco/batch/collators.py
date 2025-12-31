@@ -218,13 +218,20 @@ class BaseCollator:
         
         batch_size = len(user_indices)
         # Get dense rating vectors for each user from sparse_interaction matrix
-        # sparse_interaction is a scipy.sparse.csr_matrix of shape [n_users, n_items]
+        # sparse_interaction is a scipy.sparse.csr_matrix
         user_rating_vectors = np.zeros((batch_size, self.n_items), dtype=np.float32)
         
+        # The sparse matrix might have different shape than n_items 
+        # (depends on max item index in data)
+        sparse_n_cols = self.sparse_interaction.shape[0]
+        copy_cols = min(self.sparse_interaction.shape[1], self.n_items)
+        
         for i, (user_idx, item_idx) in enumerate(zip(user_indices, item_indices)):
-            if user_idx < self.sparse_interaction.shape[0]:
+            if user_idx < sparse_n_cols:
                 # Get the user's row from sparse matrix as dense array
-                user_rating_vectors[i] = self.sparse_interaction[user_idx].toarray().flatten()
+                user_row = self.sparse_interaction[user_idx].toarray().flatten()
+                # Copy only the valid range (handle shape mismatch)
+                user_rating_vectors[i, :copy_cols] = user_row[:copy_cols]
                 
                 # Mask the current item's rating to prevent data leakage during training
                 if mask_current_item and item_idx < self.n_items:
