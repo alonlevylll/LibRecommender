@@ -312,6 +312,9 @@ class PointwiseCollator(BaseCollator):
         user_rating_vectors = self.get_user_rating_vectors(
             user_batch, item_batch, mask_current_item=True
         )
+        user_rating_stats = self.get_user_rating_stats(
+            user_batch, item_batch, mask_current_item=True
+        )
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
         elif self.separate_features:
@@ -326,6 +329,7 @@ class PointwiseCollator(BaseCollator):
             dense_values=dense_batch,
             seqs=seq_batch,
             user_rating_vectors=user_rating_vectors,
+            user_rating_stats=user_rating_stats,
             backend=self.backend,
         )
         return batch_data
@@ -1014,6 +1018,9 @@ class LazyPointwiseCollator(LazyCollator):
         user_rating_vectors = self.get_user_rating_vectors(
             user_batch, item_batch, mask_current_item=True
         )
+        user_rating_stats = self.get_user_rating_stats(
+            user_batch, item_batch, mask_current_item=True
+        )
 
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
@@ -1030,6 +1037,7 @@ class LazyPointwiseCollator(LazyCollator):
             dense_values=dense_batch,
             seqs=seq_batch,
             user_rating_vectors=user_rating_vectors,
+            user_rating_stats=user_rating_stats,
             backend=self.backend,
         )
 
