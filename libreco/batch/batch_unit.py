@@ -75,16 +75,6 @@ class SparseSeqFeats:
 
 @dataclass
 class PointwiseBatch:
-    __slots__ = (
-        "users",
-        "items",
-        "labels",
-        "sparse_indices",
-        "dense_values",
-        "seqs",
-        "user_rating_vectors",
-    )
-
     users: Iterable[int]
     items: Iterable[int]
     labels: Iterable[float]
@@ -145,20 +135,12 @@ class PointwiseDualSeqBatch(PointwiseBatch):  # used in SIM
 
 @dataclass
 class PairwiseBatch:
-    __slots__ = (
-        "queries",
-        "item_pairs",
-        "sparse_indices",
-        "dense_values",
-        "seqs",
-    )
-
     queries: Iterable[int]
     item_pairs: Tuple[Iterable[int], Iterable[int]]
-    sparse_indices: Optional[TripleFeats[int]]
-    dense_values: Optional[TripleFeats[float]]
-    seqs: Optional[SeqFeats]
-    backend: InitVar[Backend]
+    sparse_indices: Optional[TripleFeats[int]] = None
+    dense_values: Optional[TripleFeats[float]] = None
+    seqs: Optional[SeqFeats] = None
+    backend: InitVar[Backend] = None
 
     def __post_init__(self, backend):
         if backend is Backend.TORCH:

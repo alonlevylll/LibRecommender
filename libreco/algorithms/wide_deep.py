@@ -89,6 +89,15 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         - ``True`` or ``'both'``: Use in both wide and deep parts
         - ``'wide'``: Use only in wide part (simpler, less prone to overfitting)
         - ``'deep'``: Use only in deep part
+    use_user_rating_stats : bool or str, default: False
+        Whether to use user's rating statistics (mean, std) as an interaction-based 
+        dense feature. During training, the statistics are computed excluding the 
+        current item's rating to prevent data leakage. During inference, full stats are used.
+        
+        - ``False``: Disabled (default)
+        - ``True`` or ``'both'``: Use in both wide and deep parts
+        - ``'wide'``: Use only in wide part
+        - ``'deep'``: Use only in deep part
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -115,6 +124,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
     sparse_variables = ("embedding/sparse_wide_var", "embedding/sparse_deep_var")
     dense_variables = ("embedding/dense_wide_var", "embedding/dense_deep_var")
     rating_vector_variables = ("embedding/rating_vector_wide_var", "embedding/rating_vector_deep_var")
+    rating_stats_variables = ("embedding/rating_stats_wide_var", "embedding/rating_stats_deep_var")
 
     def __init__(
         self,
@@ -135,6 +145,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         hidden_units=(128, 64, 32),
         multi_sparse_combiner="sqrtn",
         use_user_rating_vector=False,
+        use_user_rating_stats=False,
         seed=42,
         lower_upper_bound=None,
         tf_sess_config=None,
@@ -156,6 +167,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.dropout_rate = dropout_config(dropout_rate)
         self.hidden_units = hidden_units_config(hidden_units)
         self.use_user_rating_vector = use_user_rating_vector
+        self.use_user_rating_stats = use_user_rating_stats
         self.seed = seed
         self.sparse = check_sparse_indices(data_info)
         self.dense = check_dense_values(data_info)
@@ -199,8 +211,11 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             self._build_sparse()
         if self.dense:
             self._build_dense()
-        if self.use_user_rating_vector:  # True, 'both', 'wide', or 'deep'
+        # Build user rating vector if needed (for direct use or for stats computation)
+        if self.use_user_rating_vector or self.use_user_rating_stats:
             self._build_user_rating_vector()
+        if self.use_user_rating_stats:  # True, 'both', 'wide', or 'deep'
+            self._build_user_rating_stats()
 
         wide_embed = tf.concat(self.wide_embed, axis=1)
         deep_embed = tf.concat(self.deep_embed, axis=1)
@@ -385,6 +400,71 @@ class WideDeep(TfBase, metaclass=ModelMeta):
                 # [batch, n_items] @ [n_items, embed_size] -> [batch, embed_size]
                 deep_rating_embed = tf.matmul(rating_vector_norm, deep_rating_var)
                 self.deep_embed.append(deep_rating_embed)
+
+    def _build_user_rating_stats(self):
+        """Build user rating statistics feature (mean, std).
+        
+        Computes mean and std directly from self.user_rating_vector in TensorFlow.
+        The user_rating_vector placeholder is automatically created when this is enabled.
+        
+        The use_user_rating_stats parameter controls which parts use this feature:
+        - True or 'both': wide and deep parts
+        - 'wide': only wide part
+        - 'deep': only deep part
+        """
+        
+        # Determine which parts to use
+        mode = self.use_user_rating_stats
+        use_wide = mode in (True, 'both', 'wide')
+        use_deep = mode in (True, 'both', 'deep')
+        
+        # Compute mean and std from user_rating_vector
+        # Count non-zero ratings per user
+        non_zero_mask = tf.not_equal(self.user_rating_vector, 0.0)
+        non_zero_count = tf.reduce_sum(tf.cast(non_zero_mask, tf.float32), axis=1, keepdims=True)
+        non_zero_count = tf.maximum(non_zero_count, 1.0)  # Avoid division by zero
+        
+        # Sum of ratings (only non-zero)
+        rating_sum = tf.reduce_sum(self.user_rating_vector, axis=1, keepdims=True)
+        
+        # Mean of non-zero ratings
+        user_mean = rating_sum / non_zero_count
+        
+        # Variance: E[X^2] - E[X]^2 for non-zero values
+        squared_ratings = tf.square(self.user_rating_vector)
+        squared_sum = tf.reduce_sum(squared_ratings, axis=1, keepdims=True)
+        mean_of_squares = squared_sum / non_zero_count
+        variance = mean_of_squares - tf.square(user_mean)
+        variance = tf.maximum(variance, 0.0)  # Numerical stability
+        user_std = tf.sqrt(variance)
+        
+        # Concatenate mean and std: [batch, 2]
+        user_rating_stats = tf.concat([user_mean, user_std], axis=1)
+        
+        with tf.variable_scope("embedding"):
+            if use_wide:
+                # Wide part: weighted sum of stats -> scalar per sample
+                wide_stats_var = tf.get_variable(
+                    name="rating_stats_wide_var",
+                    shape=[2],
+                    initializer=tf.glorot_uniform_initializer(),
+                    regularizer=self.reg,
+                )
+                wide_stats_embed = tf.reduce_sum(
+                    user_rating_stats * wide_stats_var, axis=1, keepdims=True
+                )
+                self.wide_embed.append(wide_stats_embed)
+            
+            if use_deep:
+                # Deep part: project stats to embed_size
+                deep_stats_var = tf.get_variable(
+                    name="rating_stats_deep_var",
+                    shape=[2, self.embed_size],
+                    initializer=tf.glorot_uniform_initializer(),
+                    regularizer=self.reg,
+                )
+                deep_stats_embed = tf.matmul(user_rating_stats, deep_stats_var)
+                self.deep_embed.append(deep_stats_embed)
 
     @staticmethod
     def check_lr(lr):

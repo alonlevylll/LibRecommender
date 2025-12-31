@@ -29,9 +29,12 @@ def get_user_rating_vectors_for_inference(model, user_indices):
     -------
     numpy.ndarray or None
         Array of shape [batch_size, n_items] with full user rating vectors,
-        or None if the model doesn't use user rating vectors.
+        or None if neither use_user_rating_vector nor use_user_rating_stats is enabled.
     """
-    if not getattr(model, "use_user_rating_vector", False):
+    use_rating_vector = getattr(model, "use_user_rating_vector", False)
+    use_rating_stats = getattr(model, "use_user_rating_stats", False)
+    # Rating vectors are needed for both direct use and for computing stats
+    if not (use_rating_vector or use_rating_stats):
         return None
     if model.sparse_interaction is None:
         return None
@@ -101,6 +104,7 @@ def predict_tf_feat(model, user, item, feats, cold_start, inner_id):
         )
 
     # Get full user rating vectors for inference (without masking)
+    # Note: user_rating_stats are computed from this in the TF graph
     user_rating_vectors = get_user_rating_vectors_for_inference(model, user_indices)
 
     if model.model_name == "SIM":

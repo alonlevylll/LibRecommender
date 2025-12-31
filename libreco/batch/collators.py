@@ -63,8 +63,9 @@ class BaseCollator:
         self.user_consumed_set = None
         self.neg_probs = None
         self.np_rng = None
-        # User rating vector feature support
+        # User rating vector feature support (also needed for user_rating_stats)
         self.use_user_rating_vector = getattr(model, "use_user_rating_vector", False)
+        self.use_user_rating_stats = getattr(model, "use_user_rating_stats", False)
         self.sparse_interaction = getattr(model, "sparse_interaction", None)
 
     def __call__(self, batch):
@@ -211,9 +212,12 @@ class BaseCollator:
         -------
         numpy.ndarray or None
             Array of shape [batch_size, n_items] containing user rating vectors,
-            or None if use_user_rating_vector is False.
+            or None if neither use_user_rating_vector nor use_user_rating_stats is enabled.
         """
-        if not self.use_user_rating_vector or self.sparse_interaction is None:
+        # Rating vectors are needed for both direct use and for computing stats
+        if not (self.use_user_rating_vector or self.use_user_rating_stats):
+            return None
+        if self.sparse_interaction is None:
             return None
         
         batch_size = len(user_indices)

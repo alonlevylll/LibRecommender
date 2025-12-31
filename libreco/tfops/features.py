@@ -281,11 +281,10 @@ def get_feed_dict(
             }
         )
     # User rating vector feature (for inference, use full vectors without masking)
-    if (
-        hasattr(model, "use_user_rating_vector")
-        and model.use_user_rating_vector
-        and user_rating_vectors is not None
-    ):
+    # Also needed when use_user_rating_stats is enabled (stats computed from this in TF)
+    use_rating_vector = getattr(model, "use_user_rating_vector", False)
+    use_rating_stats = getattr(model, "use_user_rating_stats", False)
+    if (use_rating_vector or use_rating_stats) and user_rating_vectors is not None:
         feed_dict.update({model.user_rating_vector: user_rating_vectors})
     return feed_dict
 

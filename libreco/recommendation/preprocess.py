@@ -136,8 +136,11 @@ def process_tf_feat(model, user_ids, user_feats, seq, inner_id):
 
     # Get full user rating vectors for recommendation (without masking)
     # Need to repeat each user's rating vector n_items times
+    # Rating vectors are also needed when use_user_rating_stats is enabled
     user_rating_vectors = None
-    if getattr(model, "use_user_rating_vector", False):
+    use_rating_vector = getattr(model, "use_user_rating_vector", False)
+    use_rating_stats = getattr(model, "use_user_rating_stats", False)
+    if use_rating_vector or use_rating_stats:
         user_rating_vecs_per_user = get_user_rating_vectors_for_inference(model, user_ids)
         if user_rating_vecs_per_user is not None:
             # Repeat each user's rating vector n_items times
