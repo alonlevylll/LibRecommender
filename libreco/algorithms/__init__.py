@@ -3,6 +3,7 @@ from .autoint import AutoInt
 from .bpr import BPR
 from .caser import Caser
 from .deepfm import DeepFM
+from .xdeepfm import xDeepFM
 from .deepwalk import DeepWalk
 from .din import DIN
 from .fm import FM
@@ -45,6 +46,7 @@ __all__ = [
     "FM",
     "WideDeep",
     "DeepFM",
+    "xDeepFM",
     "AutoInt",
     "DIN",
     "RNN4Rec",
