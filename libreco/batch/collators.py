@@ -942,6 +942,9 @@ class LazyCollator(BaseCollator):
         user_rating_vectors = self.get_user_rating_vectors(
             user_indices, item_indices, mask_current_item=True
         )
+        user_rating_stats = self.get_user_rating_stats(
+            user_indices, item_indices, mask_current_item=True
+        )
 
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
@@ -958,6 +961,7 @@ class LazyCollator(BaseCollator):
             dense_values=dense_batch,
             seqs=seq_batch,
             user_rating_vectors=user_rating_vectors,
+            user_rating_stats=user_rating_stats,
             backend=self.backend,
         )
 

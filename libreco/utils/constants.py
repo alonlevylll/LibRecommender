@@ -10,6 +10,7 @@ class StrEnum(str, Enum):
 @unique
 class FeatModels(StrEnum):
     WIDEDEEP = "WideDeep"
+    WIDEDEEP_DYNAMIC = "WideDeepDynamic"
     FM = "FM"
     DEEPFM = "DeepFM"
     XDEEPFM = "xDeepFM"
@@ -45,6 +46,7 @@ class TfTrainModels(StrEnum):
     NCF = "NCF"
     BPR = "BPR"
     WIDEDEEP = "WideDeep"
+    WIDEDEEP_DYNAMIC = "WideDeepDynamic"
     FM = "FM"
     DEEPFM = "DeepFM"
     XDEEPFM = "xDeepFM"

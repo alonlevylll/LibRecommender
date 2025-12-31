@@ -21,7 +21,7 @@ def get_trainer(model):
         if model.model_name == "YouTubeRetrieval":
             train_params["num_sampled_per_batch"] = model.num_sampled_per_batch
             tf_trainer_cls = YoutubeRetrievalTrainer
-        elif model.model_name == "WideDeep":
+        elif model.model_name == "WideDeep" or model.model_name == "WideDeepDynamic":
             tf_trainer_cls = WideDeepTrainer
         else:
             tf_trainer_cls = TensorFlowTrainer

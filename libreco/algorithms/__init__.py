@@ -28,6 +28,7 @@ from .user_cf import UserCF
 from .user_cf_rs import RsUserCF
 from .wave_net import WaveNet
 from .wide_deep import WideDeep
+from .wide_deep_dynamic import WideDeepDynamic
 from .youtube_ranking import YouTubeRanking
 from .youtube_retrieval import YouTubeRetrieval
 
@@ -45,6 +46,7 @@ __all__ = [
     "YouTubeRanking",
     "FM",
     "WideDeep",
+    "WideDeepDynamic",
     "DeepFM",
     "xDeepFM",
     "AutoInt",
