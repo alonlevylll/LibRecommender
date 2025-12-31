@@ -90,8 +90,6 @@ def _precompute_model_user_stats(model):
     stds[counts == 0] = 0
     
     model._user_stats_cache = np.column_stack([means, stds]).astype(np.float32)
-    
-    return user_rating_stats
 
 
 def normalize_prediction(preds, model, cold_start, unknown_num, unknown_index):
