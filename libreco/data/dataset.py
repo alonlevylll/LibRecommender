@@ -657,25 +657,13 @@ class DatasetFeat(_Dataset):
             user_col, item_col, all_sparse_col, cls.dense_col
         )
 
-        # Identify which sparse/dense columns belong to user vs item
-        user_sparse_col_names = []
-        user_dense_col_names = []
-        item_sparse_col_names = []
-        item_dense_col_names = []
-
-        if user_col:
-            for col in user_col:
-                if all_sparse_col and col in all_sparse_col:
-                    user_sparse_col_names.append(col)
-                elif cls.dense_col and col in cls.dense_col:
-                    user_dense_col_names.append(col)
-
-        if item_col:
-            for col in item_col:
-                if all_sparse_col and col in all_sparse_col:
-                    item_sparse_col_names.append(col)
-                elif cls.dense_col and col in cls.dense_col:
-                    item_dense_col_names.append(col)
+        # Get column names from col_name_mapping to ensure correct ordering
+        # This matches the standard build_trainset flow where columns are ordered
+        # by their position in sparse_col/dense_col, not user_col/item_col
+        user_sparse_col_names = list(col_name_mapping.get("user_sparse_col", {}).keys())
+        user_dense_col_names = list(col_name_mapping.get("user_dense_col", {}).keys())
+        item_sparse_col_names = list(col_name_mapping.get("item_sparse_col", {}).keys())
+        item_dense_col_names = list(col_name_mapping.get("item_dense_col", {}).keys())
 
         # Build unique feature arrays from feature DataFrames
         (
@@ -688,6 +676,8 @@ class DatasetFeat(_Dataset):
             cls.item_unique_vals,
             user_features,
             item_features,
+            cls.sparse_col,
+            cls.multi_sparse_col,
             cls.sparse_unique_vals,
             cls.multi_sparse_unique_vals,
             col_name_mapping,
@@ -1058,6 +1048,8 @@ def _construct_unique_feat_lazy(
     item_unique_vals,
     user_features,
     item_features,
+    sparse_col,
+    multi_sparse_col,
     sparse_unique_vals,
     multi_sparse_unique_vals,
     col_name_mapping,
@@ -1080,40 +1072,40 @@ def _construct_unique_feat_lazy(
     item_sparse_unique = None
     item_dense_unique = None
 
-    # Build global column to offset mapping
-    all_sparse_cols = list(col_name_mapping.get("sparse_col", {}).keys())
-    all_multi_sparse_cols = []
-    if "multi_sparse" in col_name_mapping:
-        for field_cols in col_name_mapping["multi_sparse"].values():
-            all_multi_sparse_cols.extend(field_cols)
-
-    # Calculate offsets for each column
+    # Calculate offsets for each column - must match merge_offset logic exactly
     col_offset = {}
     col_oov = {}
     col_idx_mapping = {}
     cumulative_offset = 0
-    
-    for col in all_sparse_cols:
-        col_offset[col] = cumulative_offset
-        if sparse_unique_vals and col in sparse_unique_vals:
-            unique_vals = sparse_unique_vals[col]
-            col_oov[col] = len(unique_vals)
-            col_idx_mapping[col] = dict(zip(unique_vals, range(len(unique_vals))))
-            cumulative_offset += len(unique_vals) + 1
 
-    for col in all_multi_sparse_cols:
-        col_offset[col] = cumulative_offset
-        field_name = None
-        if "multi_sparse" in col_name_mapping:
-            for fname, fcols in col_name_mapping["multi_sparse"].items():
-                if col in fcols:
-                    field_name = fname
-                    break
-        if field_name and multi_sparse_unique_vals and field_name in multi_sparse_unique_vals:
-            unique_vals = multi_sparse_unique_vals[field_name]
-            col_oov[col] = len(unique_vals)
-            col_idx_mapping[col] = dict(zip(unique_vals, range(len(unique_vals))))
-            cumulative_offset += len(unique_vals) + 1
+    # Process regular sparse columns first
+    if sparse_col:
+        for col in sparse_col:
+            col_offset[col] = cumulative_offset
+            if sparse_unique_vals and col in sparse_unique_vals:
+                unique_vals = sparse_unique_vals[col]
+                col_oov[col] = len(unique_vals)
+                col_idx_mapping[col] = dict(zip(unique_vals, range(len(unique_vals))))
+                cumulative_offset += len(unique_vals) + 1
+
+    # Process multi-sparse columns - all columns in a field share the same offset
+    if multi_sparse_col:
+        for field in multi_sparse_col:
+            field_name = field[0]  # First column is the field representative
+            if multi_sparse_unique_vals and field_name in multi_sparse_unique_vals:
+                unique_vals = multi_sparse_unique_vals[field_name]
+                field_offset = cumulative_offset
+                field_oov = len(unique_vals)
+                field_idx_mapping = dict(zip(unique_vals, range(len(unique_vals))))
+
+                # All columns in this field share the same offset and mapping
+                for col in field:
+                    col_offset[col] = field_offset
+                    col_oov[col] = field_oov
+                    col_idx_mapping[col] = field_idx_mapping
+
+                # Increment offset only once per field (not per column)
+                cumulative_offset += len(unique_vals) + 1
 
     def _get_sparse_indices_vectorized(df, id_col, id_unique_vals, sparse_cols):
         """Vectorized sparse feature extraction."""
