@@ -82,6 +82,7 @@ class PointwiseBatch:
     dense_values: Optional[Iterable[float]] = None
     seqs: Optional[SeqFeats] = None
     user_rating_vectors: Optional[Iterable[float]] = None
+    user_rating_stats: Optional[Iterable[float]] = None  # [batch_size, 2] for mean/std
     backend: InitVar[Backend] = None
 
     # todo: For now, no torch model uses sequence feature
@@ -96,6 +97,8 @@ class PointwiseBatch:
                 self.dense_values = torch.from_numpy(self.dense_values)
             if self.user_rating_vectors is not None:
                 self.user_rating_vectors = torch.from_numpy(self.user_rating_vectors)
+            if self.user_rating_stats is not None:
+                self.user_rating_stats = torch.from_numpy(self.user_rating_stats)
 
     def to_device(self, device):  # pragma: no cover
         self.users = self.users.to(device)

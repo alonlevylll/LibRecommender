@@ -158,15 +158,17 @@ def _pointwise_feed_dict(model, data: PointwiseBatch, is_training):
                 model.user_interacted_len: data.seqs.interacted_len,
             }
         )
-    # User rating vector feature (also used for computing rating stats in TF graph)
+    # User rating vector / stats features
     use_rating_vector = getattr(model, "use_user_rating_vector", False)
     use_rating_stats = getattr(model, "use_user_rating_stats", False)
-    if (
-        (use_rating_vector or use_rating_stats)
-        and hasattr(data, "user_rating_vectors")
-        and data.user_rating_vectors is not None
-    ):
+    
+    # When use_user_rating_vector is enabled, pass full vectors
+    if use_rating_vector and hasattr(data, "user_rating_vectors") and data.user_rating_vectors is not None:
         feed_dict.update({model.user_rating_vector: data.user_rating_vectors})
+    # When only use_user_rating_stats is enabled (without vectors), pass pre-computed stats
+    elif use_rating_stats and not use_rating_vector and hasattr(data, "user_rating_stats") and data.user_rating_stats is not None:
+        feed_dict.update({model.user_rating_stats: data.user_rating_stats})
+    
     return feed_dict
 
 

@@ -404,8 +404,9 @@ class WideDeep(TfBase, metaclass=ModelMeta):
     def _build_user_rating_stats(self):
         """Build user rating statistics feature (mean, std).
         
-        Computes mean and std directly from self.user_rating_vector in TensorFlow.
-        The user_rating_vector placeholder is automatically created when this is enabled.
+        When use_user_rating_vector is also enabled, computes stats from user_rating_vector.
+        When only use_user_rating_stats is enabled, uses a separate small placeholder for
+        pre-computed stats (much faster, avoids creating full n_items vectors).
         
         The use_user_rating_stats parameter controls which parts use this feature:
         - True or 'both': wide and deep parts
@@ -418,32 +419,31 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         use_wide = mode in (True, 'both', 'wide')
         use_deep = mode in (True, 'both', 'deep')
         
-        # Compute mean and std from user_rating_vector
-        # Count non-zero ratings per user
-        non_zero_mask = tf.not_equal(self.user_rating_vector, 0.0)
-        non_zero_count = tf.reduce_sum(tf.cast(non_zero_mask, tf.float32), axis=1, keepdims=True)
-        non_zero_count = tf.maximum(non_zero_count, 1.0)  # Avoid division by zero
-        
-        # Sum of ratings (only non-zero)
-        rating_sum = tf.reduce_sum(self.user_rating_vector, axis=1, keepdims=True)
-        
-        # Mean of non-zero ratings
-        user_mean = rating_sum / non_zero_count
-        
-        # Variance: E[X^2] - E[X]^2 for non-zero values
-        squared_ratings = tf.square(self.user_rating_vector)
-        squared_sum = tf.reduce_sum(squared_ratings, axis=1, keepdims=True)
-        mean_of_squares = squared_sum / non_zero_count
-        variance = mean_of_squares - tf.square(user_mean)
-        variance = tf.maximum(variance, 0.0)  # Numerical stability
-        user_std = tf.sqrt(variance)
-        
-        # Concatenate mean and std: [batch, 2]
-        user_rating_stats = tf.concat([user_mean, user_std], axis=1)
+        if self.use_user_rating_vector:
+            # Compute mean and std from user_rating_vector in TensorFlow
+            non_zero_mask = tf.not_equal(self.user_rating_vector, 0.0)
+            non_zero_count = tf.reduce_sum(tf.cast(non_zero_mask, tf.float32), axis=1, keepdims=True)
+            non_zero_count = tf.maximum(non_zero_count, 1.0)
+            
+            rating_sum = tf.reduce_sum(self.user_rating_vector, axis=1, keepdims=True)
+            user_mean = rating_sum / non_zero_count
+            
+            squared_ratings = tf.square(self.user_rating_vector)
+            squared_sum = tf.reduce_sum(squared_ratings, axis=1, keepdims=True)
+            mean_of_squares = squared_sum / non_zero_count
+            variance = tf.maximum(mean_of_squares - tf.square(user_mean), 0.0)
+            user_std = tf.sqrt(variance)
+            
+            user_rating_stats = tf.concat([user_mean, user_std], axis=1)
+        else:
+            # Use pre-computed stats from collator (much faster)
+            self.user_rating_stats = tf.placeholder(
+                tf.float32, shape=[None, 2], name="user_rating_stats"
+            )
+            user_rating_stats = self.user_rating_stats
         
         with tf.variable_scope("embedding"):
             if use_wide:
-                # Wide part: weighted sum of stats -> scalar per sample
                 wide_stats_var = tf.get_variable(
                     name="rating_stats_wide_var",
                     shape=[2],
@@ -456,7 +456,6 @@ class WideDeep(TfBase, metaclass=ModelMeta):
                 self.wide_embed.append(wide_stats_embed)
             
             if use_deep:
-                # Deep part: project stats to embed_size
                 deep_stats_var = tf.get_variable(
                     name="rating_stats_deep_var",
                     shape=[2, self.embed_size],
@@ -522,8 +521,8 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         if self.loss_type == "softmax" and self.rating_labels is None:
             self._setup_rating_labels(train_data)
 
-        # Store sparse_interaction for user rating vector feature
-        if self.use_user_rating_vector and self.sparse_interaction is None:
+        # Store sparse_interaction for user rating vector/stats features
+        if (self.use_user_rating_vector or self.use_user_rating_stats) and self.sparse_interaction is None:
             self.sparse_interaction = train_data.sparse_interaction
 
         # Call parent fit()

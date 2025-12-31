@@ -75,6 +75,9 @@ class BaseCollator:
         user_rating_vectors = self.get_user_rating_vectors(
             batch["user"], batch["item"], mask_current_item=True
         )
+        user_rating_stats = self.get_user_rating_stats(
+            batch["user"], batch["item"], mask_current_item=True
+        )
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
         elif self.separate_features:
@@ -89,6 +92,7 @@ class BaseCollator:
             dense_values=dense_batch,
             seqs=seq_batch,
             user_rating_vectors=user_rating_vectors,
+            user_rating_stats=user_rating_stats,
             backend=self.backend,
         )
         return batch_data
@@ -198,50 +202,64 @@ class BaseCollator:
     def get_user_rating_vectors(self, user_indices, item_indices, mask_current_item=True):
         """Get user rating vectors for a batch of users.
         
-        Parameters
-        ----------
-        user_indices : numpy.ndarray
-            Array of user indices for the batch.
-        item_indices : numpy.ndarray
-            Array of item indices for the batch.
-        mask_current_item : bool, default: True
-            If True, mask (set to 0) the rating for the current item in each
-            user's rating vector. This prevents data leakage during training.
-            
-        Returns
-        -------
-        numpy.ndarray or None
-            Array of shape [batch_size, n_items] containing user rating vectors,
-            or None if neither use_user_rating_vector nor use_user_rating_stats is enabled.
+        Only used when use_user_rating_vector is enabled.
         """
-        # Rating vectors are needed for both direct use and for computing stats
-        if not (self.use_user_rating_vector or self.use_user_rating_stats):
+        # Only create full vectors when explicitly needed
+        if not self.use_user_rating_vector:
             return None
         if self.sparse_interaction is None:
             return None
         
         batch_size = len(user_indices)
-        # Get dense rating vectors for each user from sparse_interaction matrix
-        # sparse_interaction is a scipy.sparse.csr_matrix
         user_rating_vectors = np.zeros((batch_size, self.n_items), dtype=np.float32)
         
-        # The sparse matrix might have different shape than n_items 
-        # (depends on max item index in data)
-        sparse_n_cols = self.sparse_interaction.shape[0]
+        sparse_n_rows = self.sparse_interaction.shape[0]
         copy_cols = min(self.sparse_interaction.shape[1], self.n_items)
         
         for i, (user_idx, item_idx) in enumerate(zip(user_indices, item_indices)):
-            if user_idx < sparse_n_cols:
-                # Get the user's row from sparse matrix as dense array
+            if user_idx < sparse_n_rows:
                 user_row = self.sparse_interaction[user_idx].toarray().flatten()
-                # Copy only the valid range (handle shape mismatch)
                 user_rating_vectors[i, :copy_cols] = user_row[:copy_cols]
                 
-                # Mask the current item's rating to prevent data leakage during training
                 if mask_current_item and item_idx < self.n_items:
                     user_rating_vectors[i, item_idx] = 0.0
         
         return user_rating_vectors
+
+    def get_user_rating_stats(self, user_indices, item_indices, mask_current_item=True):
+        """Compute user rating stats (mean, std) directly from sparse matrix.
+        
+        This is much faster than creating full dense vectors when only stats are needed.
+        Returns [batch_size, 2] array with [mean, std] for each user.
+        """
+        # Only compute when stats are needed but full vectors are not
+        if not self.use_user_rating_stats or self.use_user_rating_vector:
+            return None
+        if self.sparse_interaction is None:
+            return None
+        
+        batch_size = len(user_indices)
+        user_rating_stats = np.zeros((batch_size, 2), dtype=np.float32)
+        
+        sparse_n_rows = self.sparse_interaction.shape[0]
+        
+        for i, (user_idx, item_idx) in enumerate(zip(user_indices, item_indices)):
+            if user_idx < sparse_n_rows:
+                user_row = self.sparse_interaction[user_idx]
+                # Get non-zero values directly from sparse row
+                data = user_row.data.copy()
+                indices = user_row.indices
+                
+                # Mask current item if needed
+                if mask_current_item:
+                    mask = indices != item_idx
+                    data = data[mask]
+                
+                if len(data) > 0:
+                    user_rating_stats[i, 0] = np.mean(data)  # mean
+                    user_rating_stats[i, 1] = np.std(data)   # std
+        
+        return user_rating_stats
 
 
 class SparseCollator(BaseCollator):

@@ -1,6 +1,6 @@
 import numpy as np
 
-from ..prediction.predict import get_user_rating_vectors_for_inference
+from ..prediction.predict import get_user_rating_vectors_for_inference, get_user_rating_stats_for_inference
 from ..prediction.preprocess import get_cached_dual_seq, get_cached_seqs, set_temp_feats
 from ..tfops.features import get_dual_seq_feed_dict, get_feed_dict
 
@@ -134,17 +134,22 @@ def process_tf_feat(model, user_ids, user_feats, seq, inner_id):
             model.data_info, sparse_indices, dense_values, user_feats
         )
 
-    # Get full user rating vectors for recommendation (without masking)
-    # Need to repeat each user's rating vector n_items times
-    # Rating vectors are also needed when use_user_rating_stats is enabled
+    # Get user rating vectors/stats for recommendation (without masking)
+    # Need to repeat each user's vectors/stats n_items times
     user_rating_vectors = None
+    user_rating_stats = None
     use_rating_vector = getattr(model, "use_user_rating_vector", False)
     use_rating_stats = getattr(model, "use_user_rating_stats", False)
-    if use_rating_vector or use_rating_stats:
+    
+    if use_rating_vector:
         user_rating_vecs_per_user = get_user_rating_vectors_for_inference(model, user_ids)
         if user_rating_vecs_per_user is not None:
-            # Repeat each user's rating vector n_items times
             user_rating_vectors = np.repeat(user_rating_vecs_per_user, model.n_items, axis=0)
+    elif use_rating_stats:
+        # Stats-only mode: compute stats directly (much faster)
+        user_stats_per_user = get_user_rating_stats_for_inference(model, user_ids)
+        if user_stats_per_user is not None:
+            user_rating_stats = np.repeat(user_stats_per_user, model.n_items, axis=0)
 
     if model.model_name == "SIM":
         if seq is not None and len(seq) > 0:
@@ -182,6 +187,7 @@ def process_tf_feat(model, user_ids, user_feats, seq, inner_id):
             user_interacted_seq=seqs,
             user_interacted_len=seq_len,
             user_rating_vectors=user_rating_vectors,
+            user_rating_stats=user_rating_stats,
             is_training=False,
         )
 

@@ -18,25 +18,10 @@ from ..utils.validate import check_unknown
 def get_user_rating_vectors_for_inference(model, user_indices):
     """Get full user rating vectors for inference (without masking).
     
-    Parameters
-    ----------
-    model : object
-        Model object with sparse_interaction attribute.
-    user_indices : array_like
-        Array of user indices.
-        
-    Returns
-    -------
-    numpy.ndarray or None
-        Array of shape [batch_size, n_items] with full user rating vectors,
-        or None if neither use_user_rating_vector nor use_user_rating_stats is enabled.
+    Only used when use_user_rating_vector is enabled.
     """
     use_rating_vector = getattr(model, "use_user_rating_vector", False)
-    use_rating_stats = getattr(model, "use_user_rating_stats", False)
-    # Rating vectors are needed for both direct use and for computing stats
-    if not (use_rating_vector or use_rating_stats):
-        return None
-    if model.sparse_interaction is None:
+    if not use_rating_vector or model.sparse_interaction is None:
         return None
     
     user_indices = np.asarray(user_indices)
@@ -45,18 +30,45 @@ def get_user_rating_vectors_for_inference(model, user_indices):
     
     user_rating_vectors = np.zeros((batch_size, n_items), dtype=np.float32)
     
-    # The sparse matrix might have different shape than n_items
     sparse_n_rows = model.sparse_interaction.shape[0]
     copy_cols = min(model.sparse_interaction.shape[1], n_items)
     
     for i, user_idx in enumerate(user_indices):
         if user_idx < sparse_n_rows:
-            # Get the user's row from sparse matrix as dense array
             user_row = model.sparse_interaction[user_idx].toarray().flatten()
-            # Copy only the valid range (handle shape mismatch)
             user_rating_vectors[i, :copy_cols] = user_row[:copy_cols]
     
     return user_rating_vectors
+
+
+def get_user_rating_stats_for_inference(model, user_indices):
+    """Get user rating stats (mean, std) for inference.
+    
+    Only used when use_user_rating_stats is enabled but use_user_rating_vector is not.
+    This is faster as it computes directly from sparse matrix without densifying.
+    """
+    use_rating_vector = getattr(model, "use_user_rating_vector", False)
+    use_rating_stats = getattr(model, "use_user_rating_stats", False)
+    
+    # Only return stats when stats-only mode (not when vectors are also used)
+    if not use_rating_stats or use_rating_vector or model.sparse_interaction is None:
+        return None
+    
+    user_indices = np.asarray(user_indices)
+    batch_size = len(user_indices)
+    user_rating_stats = np.zeros((batch_size, 2), dtype=np.float32)
+    
+    sparse_n_rows = model.sparse_interaction.shape[0]
+    
+    for i, user_idx in enumerate(user_indices):
+        if user_idx < sparse_n_rows:
+            user_row = model.sparse_interaction[user_idx]
+            data = user_row.data
+            if len(data) > 0:
+                user_rating_stats[i, 0] = np.mean(data)  # mean
+                user_rating_stats[i, 1] = np.std(data)   # std
+    
+    return user_rating_stats
 
 
 def normalize_prediction(preds, model, cold_start, unknown_num, unknown_index):
@@ -103,9 +115,9 @@ def predict_tf_feat(model, user, item, feats, cold_start, inner_id):
             model.data_info, sparse_indices, dense_values, feats
         )
 
-    # Get full user rating vectors for inference (without masking)
-    # Note: user_rating_stats are computed from this in the TF graph
+    # Get user rating vectors/stats for inference (without masking)
     user_rating_vectors = get_user_rating_vectors_for_inference(model, user_indices)
+    user_rating_stats = get_user_rating_stats_for_inference(model, user_indices)
 
     if model.model_name == "SIM":
         long_seqs, long_lens, short_seqs, short_lens = get_cached_dual_seq(
@@ -135,6 +147,7 @@ def predict_tf_feat(model, user, item, feats, cold_start, inner_id):
             user_interacted_seq=seqs,
             user_interacted_len=seq_len,
             user_rating_vectors=user_rating_vectors,
+            user_rating_stats=user_rating_stats,
             is_training=False,
         )
         preds = model.sess.run(model.output, feed_dict)
@@ -158,8 +171,9 @@ def predict_data_with_feats(
         sparse_indices, dense_values = features_from_batch(
             model.data_info, model.sparse, model.dense, batch_data
         )
-        # Get full user rating vectors for inference (without masking)
+        # Get user rating vectors/stats for inference (without masking)
         user_rating_vectors = get_user_rating_vectors_for_inference(model, user_indices)
+        user_rating_stats = get_user_rating_stats_for_inference(model, user_indices)
 
         if model.model_name == "SIM":
             long_seqs, long_lens, short_seqs, short_lens = get_cached_dual_seq(
@@ -189,6 +203,7 @@ def predict_data_with_feats(
                 user_interacted_seq=seqs,
                 user_interacted_len=seq_len,
                 user_rating_vectors=user_rating_vectors,
+                user_rating_stats=user_rating_stats,
                 is_training=False,
             )
             preds[batch_slice] = model.sess.run(model.output, feed_dict)

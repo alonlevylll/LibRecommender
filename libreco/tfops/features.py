@@ -250,6 +250,7 @@ def get_feed_dict(
     user_interacted_seq=None,
     user_interacted_len=None,
     user_rating_vectors=None,
+    user_rating_stats=None,
     is_training=False,
 ):
     feed_dict = dict()
@@ -280,12 +281,13 @@ def get_feed_dict(
                 model.user_interacted_len: user_interacted_len,
             }
         )
-    # User rating vector feature (for inference, use full vectors without masking)
-    # Also needed when use_user_rating_stats is enabled (stats computed from this in TF)
+    # User rating vector/stats features
     use_rating_vector = getattr(model, "use_user_rating_vector", False)
     use_rating_stats = getattr(model, "use_user_rating_stats", False)
-    if (use_rating_vector or use_rating_stats) and user_rating_vectors is not None:
+    if use_rating_vector and user_rating_vectors is not None:
         feed_dict.update({model.user_rating_vector: user_rating_vectors})
+    elif use_rating_stats and not use_rating_vector and user_rating_stats is not None:
+        feed_dict.update({model.user_rating_stats: user_rating_stats})
     return feed_dict
 
 
