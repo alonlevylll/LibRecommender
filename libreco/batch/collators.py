@@ -1,6 +1,7 @@
 import random
 
 import numpy as np
+import pandas as pd
 import torch
 
 from .batch_unit import (
@@ -488,3 +489,489 @@ def merge_columns(user_features, item_features, user_col_index, item_col_index):
     col_reindex = np.arange(len(orig_cols))[np.argsort(orig_cols)]
     concat_features = np.concatenate([user_features, item_features], axis=1)
     return concat_features[:, col_reindex]
+
+
+class LazyFeatureJoiner:
+    """Helper class for lazy feature joining during batch processing.
+
+    This class efficiently joins features from user/item DataFrames with
+    batch user/item indices using optimized pandas operations.
+    """
+
+    def __init__(
+        self,
+        data_info,
+        train_data,
+        user_features_df,
+        item_features_df,
+    ):
+        self.data_info = data_info
+        self.user_unique_vals = data_info.user_unique_vals
+        self.item_unique_vals = data_info.item_unique_vals
+        self.sparse_unique_vals = data_info.sparse_unique_vals
+        self.multi_sparse_unique_vals = data_info.multi_sparse_unique_vals
+        self.sparse_offset = data_info.sparse_offset
+
+        # Store column info from train data
+        self.sparse_col = train_data.sparse_col
+        self.dense_col = train_data.dense_col
+        self.multi_sparse_col = train_data.multi_sparse_col
+        self.user_sparse_col = train_data.user_sparse_col
+        self.user_dense_col = train_data.user_dense_col
+        self.item_sparse_col = train_data.item_sparse_col
+        self.item_dense_col = train_data.item_dense_col
+
+        # Preprocess feature DataFrames for fast lookup
+        self._user_features_indexed = None
+        self._item_features_indexed = None
+
+        if user_features_df is not None:
+            self._user_features_indexed = user_features_df.drop_duplicates(
+                subset=["user"], keep="last"
+            ).set_index("user")
+
+        if item_features_df is not None:
+            self._item_features_indexed = item_features_df.drop_duplicates(
+                subset=["item"], keep="last"
+            ).set_index("item")
+
+        # Build sparse index mappings for fast lookup
+        self._sparse_idx_mapping = {}
+        if self.sparse_unique_vals:
+            for col, vals in self.sparse_unique_vals.items():
+                self._sparse_idx_mapping[col] = dict(zip(vals, range(len(vals))))
+
+        if self.multi_sparse_unique_vals:
+            for col, vals in self.multi_sparse_unique_vals.items():
+                self._sparse_idx_mapping[col] = dict(zip(vals, range(len(vals))))
+
+        # Build column to offset mapping
+        self._col_offset = self._build_col_offset()
+
+    def _build_col_offset(self):
+        """Build mapping from column name to its offset in the embedding table."""
+        col_offset = {}
+        if self.sparse_offset is not None:
+            all_sparse_cols = []
+            if self.sparse_col:
+                all_sparse_cols.extend(self.sparse_col)
+            if self.multi_sparse_col:
+                for field in self.multi_sparse_col:
+                    all_sparse_cols.extend(field)
+            for i, col in enumerate(all_sparse_cols):
+                if i < len(self.sparse_offset):
+                    col_offset[col] = self.sparse_offset[i]
+        return col_offset
+
+    def get_features_for_batch(
+        self,
+        user_ids_inner,
+        item_ids_inner,
+        need_user_sparse=True,
+        need_user_dense=True,
+        need_item_sparse=True,
+        need_item_dense=True,
+    ):
+        """Get features for a batch of user/item inner IDs.
+
+        Parameters
+        ----------
+        user_ids_inner : numpy.ndarray
+            Inner user IDs for the batch.
+        item_ids_inner : numpy.ndarray
+            Inner item IDs for the batch.
+
+        Returns
+        -------
+        tuple
+            (sparse_indices, dense_values) for the batch.
+        """
+        batch_size = len(user_ids_inner)
+
+        # Convert inner IDs to original IDs for lookup
+        user_ids_orig = self.user_unique_vals[user_ids_inner]
+        item_ids_orig = self.item_unique_vals[item_ids_inner]
+
+        # Get user sparse features
+        user_sparse_feats = None
+        if need_user_sparse and self.user_sparse_col and self._user_features_indexed is not None:
+            user_sparse_feats = self._get_sparse_features(
+                user_ids_orig, self._user_features_indexed, self.user_sparse_col
+            )
+
+        # Get item sparse features
+        item_sparse_feats = None
+        if need_item_sparse and self.item_sparse_col and self._item_features_indexed is not None:
+            item_sparse_feats = self._get_sparse_features(
+                item_ids_orig, self._item_features_indexed, self.item_sparse_col
+            )
+
+        # Get user dense features
+        user_dense_feats = None
+        if need_user_dense and self.user_dense_col and self._user_features_indexed is not None:
+            user_dense_feats = self._get_dense_features(
+                user_ids_orig, self._user_features_indexed, self.user_dense_col
+            )
+
+        # Get item dense features
+        item_dense_feats = None
+        if need_item_dense and self.item_dense_col and self._item_features_indexed is not None:
+            item_dense_feats = self._get_dense_features(
+                item_ids_orig, self._item_features_indexed, self.item_dense_col
+            )
+
+        # Merge sparse features
+        sparse_indices = None
+        if user_sparse_feats is not None or item_sparse_feats is not None:
+            sparse_indices = self._merge_sparse_features(
+                user_sparse_feats, item_sparse_feats, batch_size
+            )
+
+        # Merge dense features
+        dense_values = None
+        if user_dense_feats is not None or item_dense_feats is not None:
+            dense_values = self._merge_dense_features(
+                user_dense_feats, item_dense_feats, batch_size
+            )
+
+        return sparse_indices, dense_values
+
+    def _get_sparse_features(self, ids_orig, features_df, col_names):
+        """Get sparse feature indices for a batch of original IDs."""
+        batch_size = len(ids_orig)
+        n_features = len(col_names)
+        indices = np.zeros((batch_size, n_features), dtype=np.int32)
+
+        for j, col in enumerate(col_names):
+            if col not in features_df.columns:
+                continue
+
+            # Get column offset
+            offset = self._col_offset.get(col, 0)
+
+            # Determine which unique values dict to use
+            if self.sparse_unique_vals and col in self.sparse_unique_vals:
+                idx_mapping = self._sparse_idx_mapping[col]
+                oov_val = len(self.sparse_unique_vals[col])
+            elif self.multi_sparse_unique_vals:
+                # Find the field for this column
+                field_name = self._find_multi_sparse_field(col)
+                if field_name and field_name in self._sparse_idx_mapping:
+                    idx_mapping = self._sparse_idx_mapping[field_name]
+                    oov_val = len(self.multi_sparse_unique_vals[field_name])
+                else:
+                    continue
+            else:
+                continue
+
+            # Lookup features
+            for i, uid in enumerate(ids_orig):
+                if uid in features_df.index:
+                    val = features_df.loc[uid, col]
+                    indices[i, j] = idx_mapping.get(val, oov_val) + offset
+                else:
+                    indices[i, j] = oov_val + offset
+
+        return indices
+
+    def _find_multi_sparse_field(self, col):
+        """Find the field name for a multi-sparse column."""
+        if self.multi_sparse_col:
+            for field in self.multi_sparse_col:
+                if col in field:
+                    return field[0]  # First column is the field name
+        return None
+
+    def _get_dense_features(self, ids_orig, features_df, col_names):
+        """Get dense feature values for a batch of original IDs."""
+        batch_size = len(ids_orig)
+        n_features = len(col_names)
+        values = np.zeros((batch_size, n_features), dtype=np.float32)
+
+        for j, col in enumerate(col_names):
+            if col not in features_df.columns:
+                continue
+
+            for i, uid in enumerate(ids_orig):
+                if uid in features_df.index:
+                    values[i, j] = features_df.loc[uid, col]
+
+        return values
+
+    def _merge_sparse_features(self, user_feats, item_feats, batch_size):
+        """Merge user and item sparse features into a single matrix."""
+        if user_feats is not None and item_feats is not None:
+            # Need to merge in the correct column order
+            user_col_index = self.data_info.user_sparse_col.index
+            item_col_index = self.data_info.item_sparse_col.index
+            return merge_columns(user_feats, item_feats, user_col_index, item_col_index)
+        elif user_feats is not None:
+            return user_feats
+        else:
+            return item_feats
+
+    def _merge_dense_features(self, user_feats, item_feats, batch_size):
+        """Merge user and item dense features into a single matrix."""
+        if user_feats is not None and item_feats is not None:
+            user_col_index = self.data_info.user_dense_col.index
+            item_col_index = self.data_info.item_dense_col.index
+            return merge_columns(user_feats, item_feats, user_col_index, item_col_index)
+        elif user_feats is not None:
+            return user_feats
+        else:
+            return item_feats
+
+    def get_item_features_by_inner_ids(self, item_ids_inner):
+        """Get item features for sampled items by inner IDs.
+
+        Used for negative sampling where we need item features for new items.
+        """
+        item_ids_orig = self.item_unique_vals[item_ids_inner]
+
+        item_sparse = None
+        if self.item_sparse_col and self._item_features_indexed is not None:
+            item_sparse = self._get_sparse_features(
+                item_ids_orig, self._item_features_indexed, self.item_sparse_col
+            )
+
+        item_dense = None
+        if self.item_dense_col and self._item_features_indexed is not None:
+            item_dense = self._get_dense_features(
+                item_ids_orig, self._item_features_indexed, self.item_dense_col
+            )
+
+        return item_sparse, item_dense
+
+
+class LazyCollator(BaseCollator):
+    """Collator for lazy loading mode that joins features on-the-fly.
+
+    This collator uses pandas join operations to construct feature vectors
+    during batch processing, significantly reducing memory usage.
+    """
+
+    def __init__(
+        self,
+        model,
+        data_info,
+        train_data,
+        backend,
+        separate_features=False,
+        temperature=0.75,
+    ):
+        super().__init__(model, data_info, backend, separate_features, temperature)
+        self.feature_joiner = LazyFeatureJoiner(
+            data_info,
+            train_data,
+            train_data.user_features_df,
+            train_data.item_features_df,
+        )
+
+    def __call__(self, batch):
+        user_indices = batch["user"]
+        item_indices = batch["item"]
+        labels = batch["label"]
+
+        # Join features on-the-fly
+        sparse_batch, dense_batch = self.feature_joiner.get_features_for_batch(
+            user_indices, item_indices
+        )
+
+        # Handle separate features mode
+        if self.separate_features and sparse_batch is not None:
+            user_col_index = self.user_sparse_col_index
+            item_col_index = self.item_sparse_col_index
+            user_sparse = sparse_batch[:, user_col_index] if user_col_index else None
+            item_sparse = sparse_batch[:, item_col_index] if item_col_index else None
+            sparse_batch = PairFeats(user_sparse, item_sparse)
+
+        if self.separate_features and dense_batch is not None:
+            user_col_index = self.user_dense_col_index
+            item_col_index = self.item_dense_col_index
+            user_dense = dense_batch[:, user_col_index] if user_col_index else None
+            item_dense = dense_batch[:, item_col_index] if item_col_index else None
+            dense_batch = PairFeats(user_dense, item_dense)
+
+        seq_batch = self.get_seqs(user_indices, item_indices)
+
+        if self.dual_seq:
+            batch_cls = PointwiseDualSeqBatch
+        elif self.separate_features:
+            batch_cls = PointwiseSepFeatBatch
+        else:
+            batch_cls = PointwiseBatch
+
+        batch_data = batch_cls(
+            users=user_indices,
+            items=item_indices,
+            labels=labels,
+            sparse_indices=sparse_batch,
+            dense_values=dense_batch,
+            seqs=seq_batch,
+            backend=self.backend,
+        )
+        return batch_data
+
+
+class LazyPointwiseCollator(LazyCollator):
+    """Lazy collator for pointwise loss with negative sampling."""
+
+    def __init__(
+        self,
+        model,
+        data_info,
+        train_data,
+        backend,
+        separate_features=False,
+    ):
+        super().__init__(model, data_info, train_data, backend, separate_features)
+        self.sampler = model.sampler
+        self.num_neg = model.num_neg
+
+    def __call__(self, batch):
+        user_batch = np.repeat(batch["user"], self.num_neg + 1)
+        item_batch = np.repeat(batch["item"], self.num_neg + 1)
+        label_batch = np.zeros_like(item_batch, dtype=np.float32)
+        label_batch[:: (self.num_neg + 1)] = 1.0
+
+        # Sample negative items
+        items_neg = self.sample_neg_items(batch, self.sampler, self.num_neg)
+        for i in range(self.num_neg):
+            item_batch[(i + 1) :: (self.num_neg + 1)] = items_neg[i :: self.num_neg]
+
+        # Join features on-the-fly
+        sparse_batch, dense_batch = self._get_pointwise_feats_lazy(
+            batch, item_batch
+        )
+
+        seq_batch = self.get_seqs(user_batch, item_batch)
+
+        if self.dual_seq:
+            batch_cls = PointwiseDualSeqBatch
+        elif self.separate_features:
+            batch_cls = PointwiseSepFeatBatch
+        else:
+            batch_cls = PointwiseBatch
+
+        batch_data = batch_cls(
+            users=user_batch,
+            items=item_batch,
+            labels=label_batch,
+            sparse_indices=sparse_batch,
+            dense_values=dense_batch,
+            seqs=seq_batch,
+            backend=self.backend,
+        )
+        return batch_data
+
+    def _get_pointwise_feats_lazy(self, batch, item_batch):
+        """Get features for pointwise batch with lazy loading."""
+        user_indices = np.repeat(batch["user"], self.num_neg + 1)
+
+        # Get all features (including for negative sampled items)
+        sparse_batch, dense_batch = self.feature_joiner.get_features_for_batch(
+            user_indices, item_batch
+        )
+
+        if self.separate_features:
+            if sparse_batch is not None:
+                user_col_index = self.user_sparse_col_index
+                item_col_index = self.item_sparse_col_index
+                user_sparse = sparse_batch[:, user_col_index] if user_col_index else None
+                item_sparse = sparse_batch[:, item_col_index] if item_col_index else None
+                sparse_batch = PairFeats(user_sparse, item_sparse)
+
+            if dense_batch is not None:
+                user_col_index = self.user_dense_col_index
+                item_col_index = self.item_dense_col_index
+                user_dense = dense_batch[:, user_col_index] if user_col_index else None
+                item_dense = dense_batch[:, item_col_index] if item_col_index else None
+                dense_batch = PairFeats(user_dense, item_dense)
+
+        return sparse_batch, dense_batch
+
+
+class LazyPairwiseCollator(LazyCollator):
+    """Lazy collator for pairwise loss with negative sampling."""
+
+    def __init__(
+        self,
+        model,
+        data_info,
+        train_data,
+        backend,
+        repeat_positives,
+    ):
+        super().__init__(model, data_info, train_data, backend, separate_features=True)
+        self.sampler = model.sampler
+        self.num_neg = model.num_neg
+        self.repeat_positives = repeat_positives
+
+    def __call__(self, batch):
+        if self.repeat_positives and self.num_neg > 1:
+            users = np.repeat(batch["user"], self.num_neg)
+            items_pos = np.repeat(batch["item"], self.num_neg)
+        else:
+            users = batch["user"]
+            items_pos = batch["item"]
+
+        items_neg = self.sample_neg_items(batch, self.sampler, self.num_neg)
+
+        sparse_batch, dense_batch = self._get_pairwise_feats_lazy(
+            batch, users, items_pos, items_neg
+        )
+
+        seq_batch = self.get_seqs(users, items_pos)
+        if self.has_seq and not self.repeat_positives and self.num_neg > 1:
+            seq_batch = seq_batch.repeat(self.num_neg)
+
+        batch_data = PairwiseBatch(
+            queries=users,
+            item_pairs=(items_pos, items_neg),
+            sparse_indices=sparse_batch,
+            dense_values=dense_batch,
+            seqs=seq_batch,
+            backend=self.backend,
+        )
+        return batch_data
+
+    def _get_pairwise_feats_lazy(self, batch, users, items_pos, items_neg):
+        """Get features for pairwise batch with lazy loading."""
+        # Get user features
+        user_sparse, user_dense = self.feature_joiner.get_features_for_batch(
+            users,
+            items_pos,  # Dummy item indices, we only need user features
+            need_user_sparse=True,
+            need_user_dense=True,
+            need_item_sparse=False,
+            need_item_dense=False,
+        )
+
+        # Get positive item features
+        item_pos_sparse, item_pos_dense = self.feature_joiner.get_item_features_by_inner_ids(
+            items_pos
+        )
+
+        # Get negative item features
+        item_neg_sparse, item_neg_dense = self.feature_joiner.get_item_features_by_inner_ids(
+            items_neg
+        )
+
+        # Build TripleFeats
+        sparse_batch = None
+        if user_sparse is not None or item_pos_sparse is not None:
+            sparse_batch = TripleFeats(
+                query_feats=user_sparse,
+                item_pos_feats=item_pos_sparse,
+                item_neg_feats=item_neg_sparse,
+            )
+
+        dense_batch = None
+        if user_dense is not None or item_pos_dense is not None:
+            dense_batch = TripleFeats(
+                query_feats=user_dense,
+                item_pos_feats=item_pos_dense,
+                item_neg_feats=item_neg_dense,
+            )
+
+        return sparse_batch, dense_batch

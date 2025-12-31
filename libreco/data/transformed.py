@@ -1,6 +1,7 @@
 """Transformed Dataset."""
 from collections import defaultdict
 from random import seed as set_random_seed
+from typing import Optional, Dict, List, Any
 
 import numpy as np
 import pandas as pd
@@ -96,6 +97,180 @@ class TransformedSet:
     def sparse_interaction(self):
         """User-item interaction data, in :class:`scipy.sparse.csr_matrix` format."""
         return self._sparse_interaction
+
+    @property
+    def is_lazy(self):
+        """Whether the dataset is lazy loaded (features loaded on-the-fly)."""
+        return False
+
+
+class LazyTransformedSet:
+    """Memory-efficient dataset that loads features on-the-fly during batch processing.
+
+    Instead of storing all feature values in memory, this class stores references to
+    user and item feature DataFrames and constructs feature vectors during batch processing.
+
+    Parameters
+    ----------
+    user_indices : numpy.ndarray
+        All user rows in data, represented in inner id.
+    item_indices : numpy.ndarray
+        All item rows in data, represented in inner id.
+    labels : numpy.ndarray
+        All labels in data.
+    user_features_df : pandas.DataFrame or None
+        DataFrame with user features (user column + feature columns).
+    item_features_df : pandas.DataFrame or None
+        DataFrame with item features (item column + feature columns).
+    sparse_col : list of str or None
+        List of sparse feature column names.
+    dense_col : list of str or None
+        List of dense feature column names.
+    multi_sparse_col : list of list of str or None
+        Nested lists of multi-sparse feature column names.
+    user_sparse_col : list of str or None
+        List of user sparse column names.
+    user_dense_col : list of str or None
+        List of user dense column names.
+    item_sparse_col : list of str or None
+        List of item sparse column names.
+    item_dense_col : list of str or None
+        List of item dense column names.
+
+    See Also
+    --------
+    :class:`~libreco.data.dataset.DatasetFeat`
+    :class:`TransformedSet`
+    """
+
+    def __init__(
+        self,
+        user_indices: np.ndarray,
+        item_indices: np.ndarray,
+        labels: np.ndarray,
+        user_features_df: Optional[pd.DataFrame] = None,
+        item_features_df: Optional[pd.DataFrame] = None,
+        sparse_col: Optional[List[str]] = None,
+        dense_col: Optional[List[str]] = None,
+        multi_sparse_col: Optional[List[List[str]]] = None,
+        user_sparse_col: Optional[List[str]] = None,
+        user_dense_col: Optional[List[str]] = None,
+        item_sparse_col: Optional[List[str]] = None,
+        item_dense_col: Optional[List[str]] = None,
+    ):
+        self._user_indices = user_indices
+        self._item_indices = item_indices
+        self._labels = labels
+        self._user_features_df = user_features_df
+        self._item_features_df = item_features_df
+        self._sparse_col = sparse_col
+        self._dense_col = dense_col
+        self._multi_sparse_col = multi_sparse_col
+        self._user_sparse_col = user_sparse_col
+        self._user_dense_col = user_dense_col
+        self._item_sparse_col = item_sparse_col
+        self._item_dense_col = item_dense_col
+        self._sparse_interaction = self.construct_sparse()
+        # For compatibility, these are None (not precomputed)
+        self._sparse_indices = None
+        self._dense_values = None
+
+    def construct_sparse(self):
+        interaction = pd.DataFrame(
+            {"user": self.user_indices, "item": self.item_indices, "label": self.labels}
+        )
+        interaction = interaction.drop_duplicates(subset=["user", "item"], keep="last")
+        user_indices = interaction["user"].to_numpy()
+        item_indices = interaction["item"].to_numpy()
+        labels = interaction["label"].to_numpy()
+        return csr_matrix((labels, (user_indices, item_indices)), dtype=np.float32)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, index):
+        """Get a slice of data."""
+        return self.user_indices[index], self.item_indices[index], self.labels[index]
+
+    @property
+    def user_indices(self):
+        """All user rows in data"""
+        return self._user_indices
+
+    @property
+    def item_indices(self):
+        """All item rows in data"""
+        return self._item_indices
+
+    @property
+    def sparse_indices(self):
+        """All sparse rows in data (None for lazy loading)"""
+        return self._sparse_indices
+
+    @property
+    def dense_values(self):
+        """All dense rows in data (None for lazy loading)"""
+        return self._dense_values
+
+    @property
+    def labels(self):
+        """All labels in data"""
+        return self._labels
+
+    @property
+    def sparse_interaction(self):
+        """User-item interaction data, in :class:`scipy.sparse.csr_matrix` format."""
+        return self._sparse_interaction
+
+    @property
+    def is_lazy(self):
+        """Whether the dataset is lazy loaded (features loaded on-the-fly)."""
+        return True
+
+    @property
+    def user_features_df(self):
+        """User features DataFrame for lazy loading."""
+        return self._user_features_df
+
+    @property
+    def item_features_df(self):
+        """Item features DataFrame for lazy loading."""
+        return self._item_features_df
+
+    @property
+    def sparse_col(self):
+        """Sparse column names."""
+        return self._sparse_col
+
+    @property
+    def dense_col(self):
+        """Dense column names."""
+        return self._dense_col
+
+    @property
+    def multi_sparse_col(self):
+        """Multi-sparse column names."""
+        return self._multi_sparse_col
+
+    @property
+    def user_sparse_col(self):
+        """User sparse column names."""
+        return self._user_sparse_col
+
+    @property
+    def user_dense_col(self):
+        """User dense column names."""
+        return self._user_dense_col
+
+    @property
+    def item_sparse_col(self):
+        """Item sparse column names."""
+        return self._item_sparse_col
+
+    @property
+    def item_dense_col(self):
+        """Item dense column names."""
+        return self._item_dense_col
 
 
 class TransformedEvalSet:

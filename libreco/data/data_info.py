@@ -156,6 +156,10 @@ class DataInfo:
         self.old_info = None
         self.all_args = locals()
         self.add_oovs()
+        # Lazy loading mode attributes (set by DatasetFeat.build_trainset_lazy)
+        self.lazy_mode = False
+        self.lazy_user_features_df = None
+        self.lazy_item_features_df = None
 
     @staticmethod
     def map_sparse_vals(sparse_unique_vals, multi_sparse_unique_vals):

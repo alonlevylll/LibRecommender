@@ -1,5 +1,7 @@
 import math
 
+import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
@@ -7,6 +9,9 @@ from .collators import BaseCollator as NormalCollator
 from .collators import (
     GraphCollator,
     GraphDGLCollator,
+    LazyCollator,
+    LazyPairwiseCollator,
+    LazyPointwiseCollator,
     PairwiseCollator,
     PointwiseCollator,
     SparseCollator,
@@ -25,6 +30,7 @@ class BatchData(torch.utils.data.Dataset):
         self.dense_values = data.dense_values
         self.use_features = use_features
         self.factor = factor
+        self.is_lazy = False
 
     def __getitem__(self, idx):
         batch = {
@@ -43,6 +49,59 @@ class BatchData(torch.utils.data.Dataset):
         return math.ceil(length / self.factor) if self.factor is not None else length
 
 
+class LazyBatchData(torch.utils.data.Dataset):
+    """Memory-efficient dataset that provides only user/item indices per batch.
+
+    Features are joined on-the-fly by the collator during batch processing.
+    This significantly reduces memory usage for large datasets.
+
+    Parameters
+    ----------
+    data : LazyTransformedSet
+        Lazy transformed data containing user_indices, item_indices, labels.
+    use_features : bool
+        Whether the model uses features.
+    factor : int or None
+        Factor for adjusting dataset length (used in some models).
+    """
+
+    def __init__(self, data, use_features, factor=None):
+        self.user_indices = data.user_indices
+        self.item_indices = data.item_indices
+        self.labels = data.labels
+        self.use_features = use_features
+        self.factor = factor
+        self.is_lazy = True
+        # Store references to feature DataFrames
+        self.user_features_df = data.user_features_df
+        self.item_features_df = data.item_features_df
+        # Store column info
+        self.sparse_col = data.sparse_col
+        self.dense_col = data.dense_col
+        self.multi_sparse_col = data.multi_sparse_col
+        self.user_sparse_col = data.user_sparse_col
+        self.user_dense_col = data.user_dense_col
+        self.item_sparse_col = data.item_sparse_col
+        self.item_dense_col = data.item_dense_col
+
+    def __getitem__(self, idx):
+        """Return batch of user/item indices and labels without features.
+
+        Features will be joined by the collator.
+        """
+        batch = {
+            "user": self.user_indices[idx],
+            "item": self.item_indices[idx],
+            "label": self.labels[idx],
+            "is_lazy": True,
+        }
+        return batch
+
+    def __len__(self):
+        length = len(self.labels)
+        return math.ceil(length / self.factor) if self.factor is not None else length
+
+
 def get_batch_loader(model, data, neg_sampling, batch_size, shuffle, num_workers, seed):
     torch.manual_seed(seed)
     use_features = True if FeatModels.contains(model.model_name) else False
@@ -51,10 +110,19 @@ def get_batch_loader(model, data, neg_sampling, batch_size, shuffle, num_workers
         if SageModels.contains(model.model_name) and model.paradigm == "i2i"
         else None
     )
-    batch_data = BatchData(data, use_features, factor)
+
+    # Check if data is lazy mode
+    is_lazy = getattr(data, "is_lazy", False)
+
+    if is_lazy:
+        batch_data = LazyBatchData(data, use_features, factor)
+        collate_fn = get_lazy_collate_fn(model, data, neg_sampling, num_workers)
+    else:
+        batch_data = BatchData(data, use_features, factor)
+        collate_fn = get_collate_fn(model, neg_sampling, num_workers)
+
     sampler = RandomSampler(batch_data) if shuffle else SequentialSampler(batch_data)
     batch_sampler = BatchSampler(sampler, batch_size=batch_size, drop_last=False)
-    collate_fn = get_collate_fn(model, neg_sampling, num_workers)
     return DataLoader(
         batch_data,
         batch_size=None,  # `batch_size=None` disables automatic batching
@@ -86,6 +154,41 @@ def get_collate_fn(model, neg_sampling, num_workers):
         else:
             repeat_positives = True if backend is Backend.TF else False
             collate_fn = PairwiseCollator(model, data_info, backend, repeat_positives)
+    return collate_fn
+
+
+def get_lazy_collate_fn(model, data, neg_sampling, num_workers):
+    """Get collate function for lazy loading mode.
+
+    In lazy mode, features are joined on-the-fly during batch processing.
+    """
+    model_name, data_info = model.model_name, model.data_info
+    backend = Backend.TF if TfTrainModels.contains(model_name) else Backend.TORCH
+    separate_features = True if model_name == "TwoTower" else False
+
+    # For lazy loading, use lazy collators that perform feature joins
+    if model_name == "YouTubeRetrieval":
+        # YouTubeRetrieval uses SparseCollator - not supported in lazy mode yet
+        raise NotImplementedError(
+            "YouTubeRetrieval model is not yet supported in lazy loading mode."
+        )
+    elif SageModels.contains(model_name):
+        # Graph models not supported in lazy mode yet
+        raise NotImplementedError(
+            "GraphSage models are not yet supported in lazy loading mode."
+        )
+    elif model.task == "rating" or not neg_sampling:
+        collate_fn = LazyCollator(model, data_info, data, backend, separate_features)
+    else:
+        if model.loss_type in ("cross_entropy", "focal"):
+            collate_fn = LazyPointwiseCollator(
+                model, data_info, data, backend, separate_features
+            )
+        else:
+            repeat_positives = True if backend is Backend.TF else False
+            collate_fn = LazyPairwiseCollator(
+                model, data_info, data, backend, repeat_positives
+            )
     return collate_fn
 
 
