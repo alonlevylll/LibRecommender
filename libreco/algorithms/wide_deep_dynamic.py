@@ -241,6 +241,10 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
             self._build_user_preference_sparse()
 
         wide_embed = tf.concat(self.wide_embed, axis=1)
+        
+        if self.loss_type != "softmax":
+            wide_term = tf_dense(units=1, name="wide_term")(wide_embed)
+
         deep_embed = tf.concat(self.deep_embed, axis=1)
         deep_layer = dense_nn(
             deep_embed,
@@ -272,7 +276,6 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
                 self.proba_output * self.rating_labels_tf, axis=1, name="output"
             )
         else:
-            wide_term = tf_dense(units=1, name="wide_term")(wide_embed)
             deep_term = tf_dense(units=1, name="deep_term")(deep_layer)
             self.output = tf.squeeze(tf.add(wide_term, deep_term))
 
