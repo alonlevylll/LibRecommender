@@ -284,9 +284,12 @@ def get_feed_dict(
     # User rating vector/stats features
     use_rating_vector = getattr(model, "use_user_rating_vector", False)
     use_rating_stats = getattr(model, "use_user_rating_stats", False)
-    if use_rating_vector and user_rating_vectors is not None:
+    use_preference_sparse = getattr(model, "use_user_preference_sparse", False)
+    # Feed rating vector when directly used OR when preference sparse needs it
+    if (use_rating_vector or use_preference_sparse) and user_rating_vectors is not None:
         feed_dict.update({model.user_rating_vector: user_rating_vectors})
-    elif use_rating_stats and not use_rating_vector and user_rating_stats is not None:
+    # Feed pre-computed stats only when stats enabled but not rating vector or preference sparse
+    elif use_rating_stats and not use_rating_vector and not use_preference_sparse and user_rating_stats is not None:
         feed_dict.update({model.user_rating_stats: user_rating_stats})
     return feed_dict
 
