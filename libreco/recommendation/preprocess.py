@@ -140,8 +140,10 @@ def process_tf_feat(model, user_ids, user_feats, seq, inner_id):
     user_rating_stats = None
     use_rating_vector = getattr(model, "use_user_rating_vector", False)
     use_rating_stats = getattr(model, "use_user_rating_stats", False)
+    use_pref_sparse = getattr(model, "use_user_preference_sparse", False)
     
-    if use_rating_vector:
+    # Rating vectors needed for: direct use, or preference sparse (computed in TF from vectors)
+    if use_rating_vector or use_pref_sparse:
         user_rating_vecs_per_user = get_user_rating_vectors_for_inference(model, user_ids)
         if user_rating_vecs_per_user is not None:
             user_rating_vectors = np.repeat(user_rating_vecs_per_user, model.n_items, axis=0)

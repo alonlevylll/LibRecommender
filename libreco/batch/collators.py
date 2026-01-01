@@ -63,9 +63,10 @@ class BaseCollator:
         self.user_consumed_set = None
         self.neg_probs = None
         self.np_rng = None
-        # User rating vector feature support (also needed for user_rating_stats)
+        # User rating vector feature support (also needed for user_rating_stats and preference_sparse)
         self.use_user_rating_vector = getattr(model, "use_user_rating_vector", False)
         self.use_user_rating_stats = getattr(model, "use_user_rating_stats", False)
+        self.use_user_preference_sparse = getattr(model, "use_user_preference_sparse", False)
         self.sparse_interaction = getattr(model, "sparse_interaction", None)
 
     def __call__(self, batch):
@@ -202,10 +203,10 @@ class BaseCollator:
     def get_user_rating_vectors(self, user_indices, item_indices, mask_current_item=True):
         """Get user rating vectors for a batch of users.
         
-        Only used when use_user_rating_vector is enabled.
+        Used when use_user_rating_vector or use_user_preference_sparse is enabled.
         """
-        # Only create full vectors when explicitly needed
-        if not self.use_user_rating_vector:
+        # Create vectors when needed for direct use or for preference sparse computation
+        if not (self.use_user_rating_vector or self.use_user_preference_sparse):
             return None
         if self.sparse_interaction is None:
             return None

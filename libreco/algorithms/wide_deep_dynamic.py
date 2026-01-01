@@ -98,6 +98,19 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         - ``True`` or ``'both'``: Use in both wide and deep parts
         - ``'wide'``: Use only in wide part
         - ``'deep'``: Use only in deep part
+    use_user_preference_sparse : bool or str, default: False
+        Whether to use a sparse representation of user's liked/unliked items.
+        Creates a 100-dimensional binary vector: 50 columns for top liked items 
+        (rating >= 3) and 50 columns for top unliked items (rating < 3).
+        Items are selected based on their popularity (total number of ratings).
+        
+        - ``False``: Disabled (default)
+        - ``True`` or ``'both'``: Use in both wide and deep parts
+        - ``'wide'``: Use only in wide part
+        - ``'deep'``: Use only in deep part
+    n_preference_items : int, default: 50
+        Number of top items to track for each preference type (liked/unliked).
+        Total feature dimension will be 2 * n_preference_items.
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -146,6 +159,8 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         multi_sparse_combiner="sqrtn",
         use_user_rating_vector=False,
         use_user_rating_stats=False,
+        use_user_preference_sparse=False,
+        n_preference_items=50,
         seed=42,
         lower_upper_bound=None,
         tf_sess_config=None,
@@ -168,7 +183,13 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         self.hidden_units = hidden_units_config(hidden_units)
         self.use_user_rating_vector = use_user_rating_vector
         self.use_user_rating_stats = use_user_rating_stats
+        self.use_user_preference_sparse = use_user_preference_sparse
+        self.n_preference_items = n_preference_items
         self.seed = seed
+        
+        # Will be set in fit() for user preference sparse feature
+        self.top_liked_items = None
+        self.top_unliked_items = None
         self.sparse = check_sparse_indices(data_info)
         self.dense = check_dense_values(data_info)
         if self.sparse:
@@ -211,11 +232,13 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
             self._build_sparse()
         if self.dense:
             self._build_dense()
-        # Build user rating vector if needed (for direct use or for stats computation)
-        if self.use_user_rating_vector or self.use_user_rating_stats:
+        # Build user rating vector if needed (for direct use, stats, or preference sparse)
+        if self.use_user_rating_vector or self.use_user_rating_stats or self.use_user_preference_sparse:
             self._build_user_rating_vector()
         if self.use_user_rating_stats:  # True, 'both', 'wide', or 'deep'
             self._build_user_rating_stats()
+        if self.use_user_preference_sparse:
+            self._build_user_preference_sparse()
 
         wide_embed = tf.concat(self.wide_embed, axis=1)
         deep_embed = tf.concat(self.deep_embed, axis=1)
@@ -465,6 +488,61 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
                 deep_stats_embed = tf.matmul(user_rating_stats, deep_stats_var)
                 self.deep_embed.append(deep_stats_embed)
 
+    def _build_user_preference_sparse(self):
+        """Build user preference sparse feature from user_rating_vector.
+        
+        Extracts binary liked/unliked indicators for top popular items from the 
+        user_rating_vector (which is already masked during training).
+        
+        Total dimension is 2 * n_preference_items:
+        - First n_preference_items columns: 1 if user rated item >= 3 (liked)
+        - Last n_preference_items columns: 1 if user rated item > 0 and < 3 (unliked)
+        """
+        mode = self.use_user_preference_sparse
+        use_wide = mode in (True, 'both', 'wide')
+        use_deep = mode in (True, 'both', 'deep')
+        
+        n_pref = self.n_preference_items
+        
+        # Extract ratings for top liked items: [batch, n_pref]
+        liked_ratings = tf.gather(self.user_rating_vector, self.top_liked_items, axis=1)
+        # Binary: 1 if rating >= 3
+        liked_binary = tf.cast(tf.greater_equal(liked_ratings, 3.0), tf.float32)
+        
+        # Extract ratings for top unliked items: [batch, n_pref]
+        unliked_ratings = tf.gather(self.user_rating_vector, self.top_unliked_items, axis=1)
+        # Binary: 1 if rating > 0 and < 3
+        unliked_binary = tf.cast(
+            tf.logical_and(tf.greater(unliked_ratings, 0.0), tf.less(unliked_ratings, 3.0)),
+            tf.float32
+        )
+        
+        # Concatenate: [batch, 2*n_pref]
+        user_preference_sparse = tf.concat([liked_binary, unliked_binary], axis=1)
+        
+        with tf.variable_scope("embedding"):
+            if use_wide:
+                wide_pref_var = tf.get_variable(
+                    name="preference_sparse_wide_var",
+                    shape=[2 * n_pref],
+                    initializer=tf.glorot_uniform_initializer(),
+                    regularizer=self.reg,
+                )
+                wide_pref_embed = tf.reduce_sum(
+                    user_preference_sparse * wide_pref_var, axis=1, keepdims=True
+                )
+                self.wide_embed.append(wide_pref_embed)
+            
+            if use_deep:
+                deep_pref_var = tf.get_variable(
+                    name="preference_sparse_deep_var",
+                    shape=[2 * n_pref, self.embed_size],
+                    initializer=tf.glorot_uniform_initializer(),
+                    regularizer=self.reg,
+                )
+                deep_pref_embed = tf.matmul(user_preference_sparse, deep_pref_var)
+                self.deep_embed.append(deep_pref_embed)
+
     @staticmethod
     def check_lr(lr):
         if not lr:
@@ -521,9 +599,13 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         if self.loss_type == "softmax" and self.rating_labels is None:
             self._setup_rating_labels(train_data)
 
-        # Store sparse_interaction for user rating vector/stats features
-        if (self.use_user_rating_vector or self.use_user_rating_stats) and self.sparse_interaction is None:
+        # Store sparse_interaction for user rating vector/stats/preference features
+        if (self.use_user_rating_vector or self.use_user_rating_stats or self.use_user_preference_sparse) and self.sparse_interaction is None:
             self.sparse_interaction = train_data.sparse_interaction
+        
+        # Compute top liked/unliked items for preference sparse feature
+        if self.use_user_preference_sparse and self.top_liked_items is None:
+            self._compute_preference_items(train_data)
 
         # Call parent fit()
         super().fit(
@@ -557,6 +639,40 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
             f"Softmax loss: detected {self.n_rating_classes} rating classes "
             f"from training data: {self.rating_labels.tolist()}"
         )
+
+    def _compute_preference_items(self, train_data):
+        """Compute top liked and unliked items based on rating frequency.
+        
+        Selects the most popular items (by total number of ratings) for each category:
+        - Liked items: items with rating >= 3
+        - Unliked items: items with rating < 3
+        """
+        sparse = train_data.sparse_interaction
+        n_items = sparse.shape[1]
+        
+        # Count liked and unliked ratings per item
+        liked_counts = np.zeros(n_items, dtype=np.int32)
+        unliked_counts = np.zeros(n_items, dtype=np.int32)
+        
+        # Iterate through all ratings efficiently using CSR format
+        for user_idx in range(sparse.shape[0]):
+            start, end = sparse.indptr[user_idx], sparse.indptr[user_idx + 1]
+            item_indices = sparse.indices[start:end]
+            ratings = sparse.data[start:end]
+            
+            liked_mask = ratings >= 3
+            unliked_mask = ratings < 3
+            
+            liked_counts[item_indices[liked_mask]] += 1
+            unliked_counts[item_indices[unliked_mask]] += 1
+        
+        # Get top n_preference_items by count
+        n = min(self.n_preference_items, n_items)
+        self.top_liked_items = np.argsort(liked_counts)[::-1][:n]
+        self.top_unliked_items = np.argsort(unliked_counts)[::-1][:n]
+        
+        print(f"User preference sparse: top {n} liked items (by count): {liked_counts[self.top_liked_items[:5]].tolist()}...")
+        print(f"User preference sparse: top {n} unliked items (by count): {unliked_counts[self.top_unliked_items[:5]].tolist()}...")
 
     def predict_proba(self, user, item, feats=None, cold_start="average", inner_id=False):
         """Get probability distribution over rating classes.

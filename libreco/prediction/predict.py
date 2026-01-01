@@ -18,10 +18,11 @@ from ..utils.validate import check_unknown
 def get_user_rating_vectors_for_inference(model, user_indices):
     """Get full user rating vectors for inference (without masking).
     
-    Only used when use_user_rating_vector is enabled.
+    Used when use_user_rating_vector or use_user_preference_sparse is enabled.
     """
     use_rating_vector = getattr(model, "use_user_rating_vector", False)
-    if not use_rating_vector or model.sparse_interaction is None:
+    use_pref_sparse = getattr(model, "use_user_preference_sparse", False)
+    if not (use_rating_vector or use_pref_sparse) or model.sparse_interaction is None:
         return None
     
     user_indices = np.asarray(user_indices)
