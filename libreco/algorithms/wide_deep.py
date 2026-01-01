@@ -1,4 +1,6 @@
 """Implementation of Wide & Deep."""
+import numpy as np
+
 from ..bases import ModelMeta, TfBase
 from ..feature.multi_sparse import true_sparse_field_size
 from ..layers import dense_nn, embedding_lookup, tf_dense
@@ -70,6 +72,13 @@ class WideDeep(TfBase, metaclass=ModelMeta):
 
     multi_sparse_combiner : {'normal', 'mean', 'sum', 'sqrtn'}, default: 'sqrtn'
         Options for combining `multi_sparse` features.
+    dense_wide_only : list of str or None, default: None
+        List of dense feature column names that should only be used in the wide part.
+        Features not in this list will be used in both wide and deep parts.
+        If None, all dense features are used in both parts.
+        
+        Example: ``dense_wide_only=['age', 'income']`` means 'age' and 'income' go
+        only to wide, while other dense features go to both wide and deep.
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -94,7 +103,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
     user_variables = ("embedding/user_wide_var", "embedding/user_deep_var")
     item_variables = ("embedding/item_wide_var", "embedding/item_deep_var")
     sparse_variables = ("embedding/sparse_wide_var", "embedding/sparse_deep_var")
-    dense_variables = ("embedding/dense_wide_var", "embedding/dense_deep_var")
+    dense_variables = ("embedding/dense_wide_var", "embedding/dense_deep_var", "embedding/dense_wide_only_var")
 
     def __init__(
         self,
@@ -114,6 +123,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         dropout_rate=None,
         hidden_units=(128, 64, 32),
         multi_sparse_combiner="sqrtn",
+        dense_wide_only=None,
         seed=42,
         lower_upper_bound=None,
         tf_sess_config=None,
@@ -134,6 +144,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.use_bn = use_bn
         self.dropout_rate = dropout_config(dropout_rate)
         self.hidden_units = hidden_units_config(hidden_units)
+        self.dense_wide_only = dense_wide_only
         self.seed = seed
         self.sparse = check_sparse_indices(data_info)
         self.dense = check_dense_values(data_info)
@@ -148,6 +159,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             )
         if self.dense:
             self.dense_field_size = dense_field_size(data_info)
+            self._setup_dense_split(data_info)
 
     def build_model(self):
         tf.set_random_seed(self.seed)
@@ -240,27 +252,81 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.wide_embed.append(wide_sparse_embed)
         self.deep_embed.append(deep_sparse_embed)
 
+    def _setup_dense_split(self, data_info):
+        """Setup indices for splitting dense features between wide-only and both networks."""
+        dense_col_names = data_info.dense_col.name
+        
+        if self.dense_wide_only is None:
+            # All features go to both networks
+            self.dense_wide_only_indices = []
+            self.dense_both_indices = list(range(len(dense_col_names)))
+        else:
+            # Validate column names
+            invalid_cols = set(self.dense_wide_only) - set(dense_col_names)
+            if invalid_cols:
+                raise ValueError(
+                    f"dense_wide_only contains invalid column names: {invalid_cols}. "
+                    f"Valid dense columns are: {dense_col_names}"
+                )
+            
+            # Get indices for each group
+            self.dense_wide_only_indices = [
+                i for i, name in enumerate(dense_col_names) 
+                if name in self.dense_wide_only
+            ]
+            self.dense_both_indices = [
+                i for i, name in enumerate(dense_col_names) 
+                if name not in self.dense_wide_only
+            ]
+
     def _build_dense(self):
         self.dense_values = tf.placeholder(
             tf.float32, shape=[None, self.dense_field_size]
         )
-        wide_dense_embed = compute_dense_feats(
-            self.dense_values,
-            var_name="dense_wide_var",
-            var_shape=[self.dense_field_size],
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-        )
-        deep_dense_embed = compute_dense_feats(
-            self.dense_values,
-            var_name="dense_deep_var",
-            var_shape=(self.dense_field_size, self.embed_size),
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-            flatten=True,
-        )
-        self.wide_embed.append(wide_dense_embed)
-        self.deep_embed.append(deep_dense_embed)
+        
+        # Split dense values into wide-only and both-network groups
+        has_wide_only = len(self.dense_wide_only_indices) > 0
+        has_both = len(self.dense_both_indices) > 0
+        
+        if has_wide_only:
+            # Features that go only to wide network
+            wide_only_indices = tf.constant(self.dense_wide_only_indices, dtype=tf.int32)
+            dense_wide_only_values = tf.gather(self.dense_values, wide_only_indices, axis=1)
+            wide_only_size = len(self.dense_wide_only_indices)
+            
+            wide_only_embed = compute_dense_feats(
+                dense_wide_only_values,
+                var_name="dense_wide_only_var",
+                var_shape=[wide_only_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.wide_embed.append(wide_only_embed)
+        
+        if has_both:
+            # Features that go to both wide and deep networks
+            both_indices = tf.constant(self.dense_both_indices, dtype=tf.int32)
+            dense_both_values = tf.gather(self.dense_values, both_indices, axis=1)
+            both_size = len(self.dense_both_indices)
+            
+            wide_dense_embed = compute_dense_feats(
+                dense_both_values,
+                var_name="dense_wide_var",
+                var_shape=[both_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.wide_embed.append(wide_dense_embed)
+            
+            deep_dense_embed = compute_dense_feats(
+                dense_both_values,
+                var_name="dense_deep_var",
+                var_shape=(both_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+                flatten=True,
+            )
+            self.deep_embed.append(deep_dense_embed)
 
     @staticmethod
     def check_lr(lr):

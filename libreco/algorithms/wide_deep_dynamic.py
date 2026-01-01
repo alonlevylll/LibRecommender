@@ -651,7 +651,8 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         - Unliked items: items with rating < 3
         """
         sparse = train_data.sparse_interaction
-        n_items = sparse.shape[1]
+        # Use model's n_items to ensure consistency with user_rating_vector shape
+        n_items = self.n_items
         
         # Count liked and unliked ratings per item
         liked_counts = np.zeros(n_items, dtype=np.int32)
@@ -662,6 +663,11 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
             start, end = sparse.indptr[user_idx], sparse.indptr[user_idx + 1]
             item_indices = sparse.indices[start:end]
             ratings = sparse.data[start:end]
+            
+            # Filter out items that exceed n_items (shouldn't happen, but safety check)
+            valid_mask = item_indices < n_items
+            item_indices = item_indices[valid_mask]
+            ratings = ratings[valid_mask]
             
             liked_mask = ratings >= 3
             unliked_mask = ratings < 3
@@ -674,8 +680,13 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         self.top_liked_items = np.argsort(liked_counts)[::-1][:n]
         self.top_unliked_items = np.argsort(unliked_counts)[::-1][:n]
         
-        print(f"User preference sparse: top {n} liked items (by count): {liked_counts[self.top_liked_items[:5]].tolist()}...")
-        print(f"User preference sparse: top {n} unliked items (by count): {unliked_counts[self.top_unliked_items[:5]].tolist()}...")
+        # Print item IDs and their counts for verification
+        top_liked_ids = self.top_liked_items[:5].tolist()
+        top_liked_cnts = liked_counts[self.top_liked_items[:5]].tolist()
+        top_unliked_ids = self.top_unliked_items[:5].tolist()
+        top_unliked_cnts = unliked_counts[self.top_unliked_items[:5]].tolist()
+        print(f"User preference sparse: top {n} liked items - IDs: {top_liked_ids}, counts: {top_liked_cnts}")
+        print(f"User preference sparse: top {n} unliked items - IDs: {top_unliked_ids}, counts: {top_unliked_cnts}")
 
     def predict_proba(self, user, item, feats=None, cold_start="average", inner_id=False):
         """Get probability distribution over rating classes.
