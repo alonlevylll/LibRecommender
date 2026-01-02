@@ -80,15 +80,33 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
 
     multi_sparse_combiner : {'normal', 'mean', 'sum', 'sqrtn'}, default: 'sqrtn'
         Options for combining `multi_sparse` features.
-    use_user_rating_vector : bool or str, default: False
-        Whether to use user's rating history as an interaction-based dense feature.
+    dense_wide_only : list of str or None, default: None
+        List of dense feature column names that should only be used in the wide part.
+        Features not in this list will be used in both wide and deep parts (unless
+        specified in dense_deep_only).
+        If None, no dense features are wide-only.
+        
+        Example: ``dense_wide_only=['age', 'income']`` means 'age' and 'income' go
+        only to wide, while other dense features go to both wide and deep.
+    dense_deep_only : list of str or None, default: None
+        List of dense feature column names that should only be used in the deep part.
+        Features not in this list will be used in both wide and deep parts (unless
+        specified in dense_wide_only).
+        If None, no dense features are deep-only.
+        
+        Example: ``dense_deep_only=['embedding_feat']`` means 'embedding_feat' goes
+        only to deep, while other dense features go to both wide and deep.
+        
+        Note: A feature cannot be in both dense_wide_only and dense_deep_only.
+
+    use_user_rating_vector : bool, default: False
+        Whether to use user's rating history as an interaction-based feature.
         During training, the rating for the current item is masked (set to 0) to prevent
         data leakage. During inference, the full rating vector is used.
         
-        - ``False``: Disabled (default)
-        - ``True`` or ``'both'``: Use in both wide and deep parts
-        - ``'wide'``: Use only in wide part (simpler, less prone to overfitting)
-        - ``'deep'``: Use only in deep part
+        This feature is fed ONLY to the deep network (not wide) as it benefits from
+        deep representation learning. The rating vector is projected to embed_size
+        dimensions and concatenated to the deep embeddings.
     use_user_rating_stats : bool or str, default: False
         Whether to use user's rating statistics (mean, std) as an interaction-based 
         dense feature. During training, the statistics are computed excluding the 
@@ -98,16 +116,15 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         - ``True`` or ``'both'``: Use in both wide and deep parts
         - ``'wide'``: Use only in wide part
         - ``'deep'``: Use only in deep part
-    use_user_preference_sparse : bool or str, default: False
+    use_user_preference_sparse : bool, default: False
         Whether to use a sparse representation of user's liked/unliked items.
-        Creates a 100-dimensional binary vector: 50 columns for top liked items 
-        (rating >= 3) and 50 columns for top unliked items (rating < 3).
+        Creates a binary vector: n_preference_items columns for top liked items 
+        (rating >= 3) and n_preference_items columns for top unliked items (rating < 3).
         Items are selected based on their popularity (total number of ratings).
         
-        - ``False``: Disabled (default)
-        - ``True`` or ``'both'``: Use in both wide and deep parts
-        - ``'wide'``: Use only in wide part
-        - ``'deep'``: Use only in deep part
+        This feature is fed ONLY to the deep network (not wide) as it benefits from
+        deep representation learning. It's projected to embed_size and concatenated
+        to other deep embeddings.
     n_preference_items : int, default: 50
         Number of top items to track for each preference type (liked/unliked).
         Total feature dimension will be 2 * n_preference_items.
@@ -135,8 +152,8 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
     user_variables = ("embedding/user_wide_var", "embedding/user_deep_var")
     item_variables = ("embedding/item_wide_var", "embedding/item_deep_var")
     sparse_variables = ("embedding/sparse_wide_var", "embedding/sparse_deep_var")
-    dense_variables = ("embedding/dense_wide_var", "embedding/dense_deep_var")
-    rating_vector_variables = ("embedding/rating_vector_wide_var", "embedding/rating_vector_deep_var")
+    dense_variables = ("embedding/dense_wide_var", "embedding/dense_deep_var", "embedding/dense_wide_only_var", "embedding/dense_deep_only_var")
+    rating_vector_variables = ("embedding/rating_vector_deep_var",)
     rating_stats_variables = ("embedding/rating_stats_wide_var", "embedding/rating_stats_deep_var")
 
     def __init__(
@@ -157,6 +174,8 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         dropout_rate=None,
         hidden_units=(128, 64, 32),
         multi_sparse_combiner="sqrtn",
+        dense_wide_only=None,
+        dense_deep_only=None,
         use_user_rating_vector=False,
         use_user_rating_stats=False,
         use_user_preference_sparse=False,
@@ -181,6 +200,8 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         self.use_bn = use_bn
         self.dropout_rate = dropout_config(dropout_rate)
         self.hidden_units = hidden_units_config(hidden_units)
+        self.dense_wide_only = dense_wide_only
+        self.dense_deep_only = dense_deep_only
         self.use_user_rating_vector = use_user_rating_vector
         self.use_user_rating_stats = use_user_rating_stats
         self.use_user_preference_sparse = use_user_preference_sparse
@@ -203,6 +224,7 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
             )
         if self.dense:
             self.dense_field_size = dense_field_size(data_info)
+            self._setup_dense_split(data_info)
 
         # Softmax loss validation (rating labels will be extracted from train_data in fit())
         if loss_type == "softmax" and task != "rating":
@@ -344,46 +366,122 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         self.wide_embed.append(wide_sparse_embed)
         self.deep_embed.append(deep_sparse_embed)
 
+    def _setup_dense_split(self, data_info):
+        """Setup indices for splitting dense features between wide-only, deep-only, and both networks."""
+        dense_col_names = data_info.dense_col.name
+        
+        wide_only_set = set(self.dense_wide_only) if self.dense_wide_only else set()
+        deep_only_set = set(self.dense_deep_only) if self.dense_deep_only else set()
+        
+        # Validate no overlap
+        overlap = wide_only_set & deep_only_set
+        if overlap:
+            raise ValueError(
+                f"Features cannot be in both dense_wide_only and dense_deep_only: {overlap}"
+            )
+        
+        # Validate column names
+        all_specified = wide_only_set | deep_only_set
+        invalid_cols = all_specified - set(dense_col_names)
+        if invalid_cols:
+            raise ValueError(
+                f"dense_wide_only/dense_deep_only contains invalid column names: {invalid_cols}. "
+                f"Valid dense columns are: {dense_col_names}"
+            )
+        
+        # Get indices for each group
+        self.dense_wide_only_indices = [
+            i for i, name in enumerate(dense_col_names) 
+            if name in wide_only_set
+        ]
+        self.dense_deep_only_indices = [
+            i for i, name in enumerate(dense_col_names) 
+            if name in deep_only_set
+        ]
+        self.dense_both_indices = [
+            i for i, name in enumerate(dense_col_names) 
+            if name not in wide_only_set and name not in deep_only_set
+        ]
+
     def _build_dense(self):
         self.dense_values = tf.placeholder(
             tf.float32, shape=[None, self.dense_field_size]
         )
-        wide_dense_embed = compute_dense_feats(
-            self.dense_values,
-            var_name="dense_wide_var",
-            var_shape=[self.dense_field_size],
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-        )
-        deep_dense_embed = compute_dense_feats(
-            self.dense_values,
-            var_name="dense_deep_var",
-            var_shape=(self.dense_field_size, self.embed_size),
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-            flatten=True,
-        )
-        self.wide_embed.append(wide_dense_embed)
-        self.deep_embed.append(deep_dense_embed)
+
+        # Split dense values into wide-only, deep-only, and both-network groups
+        has_wide_only = len(self.dense_wide_only_indices) > 0
+        has_deep_only = len(self.dense_deep_only_indices) > 0
+        has_both = len(self.dense_both_indices) > 0
+        
+        if has_wide_only:
+            # Features that go only to wide network
+            wide_only_indices = tf.constant(self.dense_wide_only_indices, dtype=tf.int32)
+            dense_wide_only_values = tf.gather(self.dense_values, wide_only_indices, axis=1)
+            wide_only_size = len(self.dense_wide_only_indices)
+            
+            wide_only_embed = compute_dense_feats(
+                dense_wide_only_values,
+                var_name="dense_wide_only_var",
+                var_shape=[wide_only_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.wide_embed.append(wide_only_embed)
+        
+        if has_deep_only:
+            # Features that go only to deep network
+            deep_only_indices = tf.constant(self.dense_deep_only_indices, dtype=tf.int32)
+            dense_deep_only_values = tf.gather(self.dense_values, deep_only_indices, axis=1)
+            deep_only_size = len(self.dense_deep_only_indices)
+            
+            deep_only_embed = compute_dense_feats(
+                dense_deep_only_values,
+                var_name="dense_deep_only_var",
+                var_shape=(deep_only_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+                flatten=True,
+            )
+            self.deep_embed.append(deep_only_embed)
+        
+        if has_both:
+            # Features that go to both wide and deep networks
+            both_indices = tf.constant(self.dense_both_indices, dtype=tf.int32)
+            dense_both_values = tf.gather(self.dense_values, both_indices, axis=1)
+            both_size = len(self.dense_both_indices)
+            
+            wide_dense_embed = compute_dense_feats(
+                dense_both_values,
+                var_name="dense_wide_var",
+                var_shape=[both_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.wide_embed.append(wide_dense_embed)
+            
+            deep_dense_embed = compute_dense_feats(
+                dense_both_values,
+                var_name="dense_deep_var",
+                var_shape=(both_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+                flatten=True,
+            )
+            self.deep_embed.append(deep_dense_embed)
+
 
     def _build_user_rating_vector(self):
-        """Build user rating vector feature.
+        """Build user rating vector feature (deep network only).
         
         This feature represents user's ratings for all items as a dense vector
         of length n_items. During training, the rating for the current item is 
         masked (set to 0) to prevent data leakage. During inference, the full 
         rating vector is used.
         
-        The use_user_rating_vector parameter controls which parts use this feature:
-        - True or 'both': wide and deep parts
-        - 'wide': only wide part (simpler, less prone to overfitting)
-        - 'deep': only deep part
+        The feature is fed ONLY to the deep network as it benefits from deep
+        representation learning. It's projected to embed_size and concatenated
+        to other deep embeddings.
         """
-        # Determine which parts to use
-        mode = self.use_user_rating_vector
-        use_wide = mode in (True, 'both', 'wide')
-        use_deep = mode in (True, 'both', 'deep')
-        
         # Placeholder for user rating vector [batch_size, n_items]
         self.user_rating_vector = tf.placeholder(
             tf.float32, shape=[None, self.n_items], name="user_rating_vector"
@@ -399,33 +497,17 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         )
         
         with tf.variable_scope("embedding"):
-            if use_wide:
-                # Wide part: weighted sum of all normalized ratings -> scalar per sample
-                # Shape: [n_items] -> learns importance weight per item
-                wide_rating_var = tf.get_variable(
-                    name="rating_vector_wide_var",
-                    shape=[self.n_items],
-                    initializer=tf.glorot_uniform_initializer(),
-                    regularizer=self.reg,
-                )
-                # [batch, n_items] * [n_items] -> [batch, n_items] -> sum -> [batch, 1]
-                wide_rating_embed = tf.reduce_sum(
-                    rating_vector_norm * wide_rating_var, axis=1, keepdims=True
-                )
-                self.wide_embed.append(wide_rating_embed)
-            
-            if use_deep:
-                # Deep part: single projection matrix to compress to embed_size
-                # Shape: [n_items, embed_size] -> projects entire rating vector to embed_size
-                deep_rating_var = tf.get_variable(
-                    name="rating_vector_deep_var",
-                    shape=[self.n_items, self.embed_size],
-                    initializer=tf.glorot_uniform_initializer(),
-                    regularizer=self.reg,
-                )
-                # [batch, n_items] @ [n_items, embed_size] -> [batch, embed_size]
-                deep_rating_embed = tf.matmul(rating_vector_norm, deep_rating_var)
-                self.deep_embed.append(deep_rating_embed)
+            # Deep part only: single projection matrix to compress to embed_size
+            # Shape: [n_items, embed_size] -> projects entire rating vector to embed_size
+            deep_rating_var = tf.get_variable(
+                name="rating_vector_deep_var",
+                shape=[self.n_items, self.embed_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            # [batch, n_items] @ [n_items, embed_size] -> [batch, embed_size]
+            deep_rating_embed = tf.matmul(rating_vector_norm, deep_rating_var)
+            self.deep_embed.append(deep_rating_embed)
 
     def _build_user_rating_stats(self):
         """Build user rating statistics feature (mean, std).
@@ -492,7 +574,7 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
                 self.deep_embed.append(deep_stats_embed)
 
     def _build_user_preference_sparse(self):
-        """Build user preference sparse feature from user_rating_vector.
+        """Build user preference sparse feature from user_rating_vector (deep network only).
         
         Extracts binary liked/unliked indicators for top popular items from the 
         user_rating_vector (which is already masked during training).
@@ -500,11 +582,11 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         Total dimension is 2 * n_preference_items:
         - First n_preference_items columns: 1 if user rated item >= 3 (liked)
         - Last n_preference_items columns: 1 if user rated item > 0 and < 3 (unliked)
-        """
-        mode = self.use_user_preference_sparse
-        use_wide = mode in (True, 'both', 'wide')
-        use_deep = mode in (True, 'both', 'deep')
         
+        The feature is fed ONLY to the deep network as it benefits from deep
+        representation learning. It's projected to embed_size and concatenated
+        to other deep embeddings.
+        """
         n_pref = self.n_preference_items
         
         # Extract ratings for top liked items: [batch, n_pref]
@@ -524,27 +606,15 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         user_preference_sparse = tf.concat([liked_binary, unliked_binary], axis=1)
         
         with tf.variable_scope("embedding"):
-            if use_wide:
-                wide_pref_var = tf.get_variable(
-                    name="preference_sparse_wide_var",
-                    shape=[2 * n_pref],
-                    initializer=tf.glorot_uniform_initializer(),
-                    regularizer=self.reg,
-                )
-                wide_pref_embed = tf.reduce_sum(
-                    user_preference_sparse * wide_pref_var, axis=1, keepdims=True
-                )
-                self.wide_embed.append(wide_pref_embed)
-            
-            if use_deep:
-                deep_pref_var = tf.get_variable(
-                    name="preference_sparse_deep_var",
-                    shape=[2 * n_pref, self.embed_size],
-                    initializer=tf.glorot_uniform_initializer(),
-                    regularizer=self.reg,
-                )
-                deep_pref_embed = tf.matmul(user_preference_sparse, deep_pref_var)
-                self.deep_embed.append(deep_pref_embed)
+            # Deep part only: project to embed_size
+            deep_pref_var = tf.get_variable(
+                name="preference_sparse_deep_var",
+                shape=[2 * n_pref, self.embed_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            deep_pref_embed = tf.matmul(user_preference_sparse, deep_pref_var)
+            self.deep_embed.append(deep_pref_embed)
 
     @staticmethod
     def check_lr(lr):
