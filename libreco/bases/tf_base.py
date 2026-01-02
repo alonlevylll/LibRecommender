@@ -68,6 +68,7 @@ class TfBase(Base):
         eval_batch_size=8192,
         eval_user_num=None,
         num_workers=0,
+        early_stop=None,
     ):
         """Fit TF model on the training data.
 
@@ -140,6 +141,7 @@ class TfBase(Base):
             eval_batch_size,
             eval_user_num,
             num_workers,
+            early_stop,
         )
         self.assign_tf_variables_oov()
         self.default_recs = recommend_tf_feat(

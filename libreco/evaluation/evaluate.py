@@ -211,3 +211,6 @@ def print_metrics(
                 metric = m
             str_val = f"{round(val, 2)}%" if m == "coverage" else f"{val:.4f}"
             print(f"\t eval {metric}: {str_val}")
+        return eval_metrics
+    
+    return None

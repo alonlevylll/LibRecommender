@@ -56,6 +56,7 @@ class TensorFlowTrainer(BaseTrainer):
         eval_batch_size,
         eval_user_num,
         num_workers,
+        early_stop,
     ):
         # Compute and store item weights for WMSE loss if needed
         if self.task == "rating" and self.loss_type == "wmse":
@@ -91,26 +92,29 @@ class TensorFlowTrainer(BaseTrainer):
                     train_loss, _ = self.sess.run(fetches, feed_dict)
                     train_total_loss.append(train_loss)
 
-            if verbose > 1:
-                train_loss_str = "train_loss: " + str(
-                    round(float(np.mean(train_total_loss)), 4)
-                )
-                print(f"\t {colorize(train_loss_str, 'green')}")
-                # get embedding for evaluation
-                if EmbeddingModels.contains(self.model.model_name):
-                    self.model.set_embeddings()
-                print_metrics(
-                    model=self.model,
-                    neg_sampling=neg_sampling,
-                    train_data=train_data,
-                    eval_data=eval_data,
-                    metrics=metrics,
-                    eval_batch_size=eval_batch_size,
-                    k=k,
-                    sample_user_num=eval_user_num,
-                    seed=self.model.seed,
-                )
-                print("=" * 30)
+            #if verbose > 1:
+            train_loss_str = "train_loss: " + str(
+                round(float(np.mean(train_total_loss)), 4)
+            )
+            print(f"\t {colorize(train_loss_str, 'green')}")
+            # get embedding for evaluation
+            if EmbeddingModels.contains(self.model.model_name):
+                self.model.set_embeddings()
+            eval_metrics = print_metrics(
+                model=self.model,
+                neg_sampling=neg_sampling,
+                train_data=train_data,
+                eval_data=eval_data,
+                metrics=metrics,
+                eval_batch_size=eval_batch_size,
+                k=k,
+                sample_user_num=eval_user_num,
+                seed=self.model.seed,
+            )
+            print("=" * 30)
+
+            if early_stop is not None and early_stop(epoch, eval_metrics):
+                break
 
     def _build_train_ops(self, **kwargs):
         if self.task == "rating" and self.loss_type == "wmse":
@@ -348,6 +352,7 @@ class WideDeepTrainer(TensorFlowTrainer):
         eval_batch_size,
         eval_user_num,
         num_workers,
+        early_stop,
     ):
         if self.task == "rating" and self.loss_type == "wmse":
             item_weights = compute_item_weights(train_data, self.model.n_items)
@@ -369,4 +374,5 @@ class WideDeepTrainer(TensorFlowTrainer):
             eval_batch_size,
             eval_user_num,
             num_workers,
+            early_stop,
         )
