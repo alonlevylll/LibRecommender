@@ -76,6 +76,24 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
         If False, feature maps are split in half (except the last layer).
     multi_sparse_combiner : {'normal', 'mean', 'sum', 'sqrtn'}, default: 'sqrtn'
         Options for combining `multi_sparse` features.
+    dense_linear_only : list of str or None, default: None
+        List of dense feature column names that should only be used in the linear part.
+        Features not in this list will be used in linear, CIN, and deep parts (unless
+        specified in dense_deep_only).
+        If None, no dense features are linear-only.
+        
+        Example: ``dense_linear_only=['age', 'income']`` means 'age' and 'income' go
+        only to linear, while other dense features go to all parts.
+    dense_deep_only : list of str or None, default: None
+        List of dense feature column names that should only be used in the deep and CIN parts
+        (not linear). Features not in this list will be used in all parts (unless
+        specified in dense_linear_only).
+        If None, no dense features are deep-only.
+        
+        Example: ``dense_deep_only=['embedding_feat']`` means 'embedding_feat' goes
+        only to CIN and deep, while other dense features go to all parts.
+        
+        Note: A feature cannot be in both dense_linear_only and dense_deep_only.
     masked_data : bool, default: False
         Whether to use masked user-item ratings as additional features. When enabled,
         the model embeds all users' ratings for all items, but masks out the current
@@ -97,7 +115,7 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
     user_variables = ("embedding/user_linear_var", "embedding/user_embeds_var")
     item_variables = ("embedding/item_linear_var", "embedding/item_embeds_var")
     sparse_variables = ("embedding/sparse_linear_var", "embedding/sparse_embeds_var")
-    dense_variables = ("embedding/dense_linear_var", "embedding/dense_embeds_var")
+    dense_variables = ("embedding/dense_linear_var", "embedding/dense_embeds_var", "embedding/dense_linear_only_var", "embedding/dense_deep_only_var")
 
     def __init__(
         self,
@@ -119,6 +137,8 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
         cin_layer_size=(50, 50),
         cin_direct=True,
         multi_sparse_combiner="sqrtn",
+        dense_linear_only=None,
+        dense_deep_only=None,
         masked_data=False,
         seed=42,
         lower_upper_bound=None,
@@ -142,6 +162,8 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
         self.hidden_units = hidden_units_config(hidden_units)
         self.cin_layer_size = list(cin_layer_size) if isinstance(cin_layer_size, (list, tuple)) else [cin_layer_size]
         self.cin_direct = cin_direct
+        self.dense_linear_only = dense_linear_only
+        self.dense_deep_only = dense_deep_only
         self.masked_data = masked_data
         self.seed = seed
         self.sparse = check_sparse_indices(data_info)
@@ -162,6 +184,7 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
             )
         if self.dense:
             self.dense_field_size = dense_field_size(data_info)
+            self._setup_dense_split(data_info)
 
     def build_model(self):
         tf.set_random_seed(self.seed)
@@ -380,36 +403,127 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
         self.cin_embed.append(sparse_cin_embed)
         self.deep_embed.append(deep_sparse_embed)
 
+    def _setup_dense_split(self, data_info):
+        """Setup indices for splitting dense features between linear-only, deep-only, and all parts."""
+        dense_col_names = data_info.dense_col.name
+        
+        linear_only_set = set(self.dense_linear_only) if self.dense_linear_only else set()
+        deep_only_set = set(self.dense_deep_only) if self.dense_deep_only else set()
+        
+        # Validate no overlap
+        overlap = linear_only_set & deep_only_set
+        if overlap:
+            raise ValueError(
+                f"Features cannot be in both dense_linear_only and dense_deep_only: {overlap}"
+            )
+        
+        # Validate column names
+        all_specified = linear_only_set | deep_only_set
+        invalid_cols = all_specified - set(dense_col_names)
+        if invalid_cols:
+            raise ValueError(
+                f"dense_linear_only/dense_deep_only contains invalid column names: {invalid_cols}. "
+                f"Valid dense columns are: {dense_col_names}"
+            )
+        
+        # Get indices for each group
+        self.dense_linear_only_indices = [
+            i for i, name in enumerate(dense_col_names) 
+            if name in linear_only_set
+        ]
+        self.dense_deep_only_indices = [
+            i for i, name in enumerate(dense_col_names) 
+            if name in deep_only_set
+        ]
+        self.dense_all_indices = [
+            i for i, name in enumerate(dense_col_names) 
+            if name not in linear_only_set and name not in deep_only_set
+        ]
+
     def _build_dense(self):
         self.dense_values = tf.placeholder(
             tf.float32, shape=[None, self.dense_field_size]
         )
-        linear_dense_embed = compute_dense_feats(
-            self.dense_values,
-            var_name="dense_linear_var",
-            var_shape=[self.dense_field_size],
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-        )
-        pairwise_dense_embed = compute_dense_feats(
-            self.dense_values,
-            var_name="dense_embeds_var",
-            var_shape=(self.dense_field_size, self.embed_size),
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-        )
         
-        # For CIN: we need [batch_size, num_fields, embed_size]
-        # pairwise_dense_embed should be [batch_size, dense_field_size, embed_size]
-        dense_cin_embed = tf.reshape(
-            pairwise_dense_embed,
-            [-1, self.dense_field_size, self.embed_size]
-        )
+        # Split dense values into linear-only, deep-only, and all-parts groups
+        has_linear_only = len(self.dense_linear_only_indices) > 0
+        has_deep_only = len(self.dense_deep_only_indices) > 0
+        has_all = len(self.dense_all_indices) > 0
         
-        deep_dense_embed = tf.keras.layers.Flatten()(pairwise_dense_embed)
-        self.linear_embed.append(linear_dense_embed)
-        self.cin_embed.append(dense_cin_embed)
-        self.deep_embed.append(deep_dense_embed)
+        if has_linear_only:
+            # Features that go only to linear part
+            linear_only_indices = tf.constant(self.dense_linear_only_indices, dtype=tf.int32)
+            dense_linear_only_values = tf.gather(self.dense_values, linear_only_indices, axis=1)
+            linear_only_size = len(self.dense_linear_only_indices)
+            
+            linear_only_embed = compute_dense_feats(
+                dense_linear_only_values,
+                var_name="dense_linear_only_var",
+                var_shape=[linear_only_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.linear_embed.append(linear_only_embed)
+        
+        if has_deep_only:
+            # Features that go only to CIN and deep parts (not linear)
+            deep_only_indices = tf.constant(self.dense_deep_only_indices, dtype=tf.int32)
+            dense_deep_only_values = tf.gather(self.dense_values, deep_only_indices, axis=1)
+            deep_only_size = len(self.dense_deep_only_indices)
+            
+            pairwise_deep_only_embed = compute_dense_feats(
+                dense_deep_only_values,
+                var_name="dense_deep_only_var",
+                var_shape=(deep_only_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            
+            # For CIN: reshape to [batch_size, num_fields, embed_size]
+            deep_only_cin_embed = tf.reshape(
+                pairwise_deep_only_embed,
+                [-1, deep_only_size, self.embed_size]
+            )
+            
+            # For deep: flatten
+            deep_only_deep_embed = tf.keras.layers.Flatten()(pairwise_deep_only_embed)
+            
+            self.cin_embed.append(deep_only_cin_embed)
+            self.deep_embed.append(deep_only_deep_embed)
+        
+        if has_all:
+            # Features that go to all parts (linear, CIN, deep)
+            all_indices = tf.constant(self.dense_all_indices, dtype=tf.int32)
+            dense_all_values = tf.gather(self.dense_values, all_indices, axis=1)
+            all_size = len(self.dense_all_indices)
+            
+            linear_dense_embed = compute_dense_feats(
+                dense_all_values,
+                var_name="dense_linear_var",
+                var_shape=[all_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            pairwise_dense_embed = compute_dense_feats(
+                dense_all_values,
+                var_name="dense_embeds_var",
+                var_shape=(all_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            
+            # For CIN: reshape to [batch_size, num_fields, embed_size]
+            dense_cin_embed = tf.reshape(
+                pairwise_dense_embed,
+                [-1, all_size, self.embed_size]
+            )
+            
+            # For deep: flatten
+            deep_dense_embed = tf.keras.layers.Flatten()(pairwise_dense_embed)
+            
+            self.linear_embed.append(linear_dense_embed)
+            self.cin_embed.append(dense_cin_embed)
+            self.deep_embed.append(deep_dense_embed)
 
     def _build_masked_ratings(self):
         """Build masked user-item ratings embeddings.
@@ -442,12 +556,15 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
         linear_ratings_embed = tf_dense(units=1, name="ratings_linear")(masked_ratings)
         linear_ratings_embed = tf.reduce_sum(linear_ratings_embed, axis=1, keepdims=True)
         
-        # Embed masked ratings for CIN part (embed_size embedding, reshaped for CIN)
+        # Embed masked ratings for CIN part
+        # CRITICAL: Aggregate to a single field instead of n_items fields to avoid
+        # computational explosion. CIN computes O(m²) interactions where m = field count.
+        # If we use n_items fields (e.g., 2000), CIN becomes infeasible.
+        # Solution: Project masked_ratings to embed_size and treat as ONE field
         cin_ratings_embed = tf_dense(units=self.embed_size, name="ratings_cin")(masked_ratings)
-        # Reshape to [batch_size, n_items, embed_size] for CIN
-        cin_ratings_embed = tf.reshape(
-            cin_ratings_embed, [-1, self.n_items, self.embed_size]
-        )
+        # Sum pool over items to get [batch_size, embed_size], then add dimension for CIN
+        cin_ratings_embed = tf.reduce_sum(cin_ratings_embed, axis=1)  # [batch, embed_size]
+        cin_ratings_embed = tf.expand_dims(cin_ratings_embed, axis=1)  # [batch, 1, embed_size]
         
         # Embed masked ratings for deep part (embed_size embedding)
         deep_ratings_embed = tf_dense(units=self.embed_size, name="ratings_deep")(masked_ratings)
