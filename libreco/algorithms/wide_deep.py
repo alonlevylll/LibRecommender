@@ -90,6 +90,30 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         only to deep, while other dense features go to both wide and deep.
         
         Note: A feature cannot be in both dense_wide_only and dense_deep_only.
+    sparse_wide_only : list of str or None, default: None
+        List of sparse feature column names that should only be used in the wide part.
+        Features not in this list will be used in both wide and deep parts (unless
+        specified in sparse_deep_only).
+        If None, no sparse features are wide-only.
+        
+        Example: ``sparse_wide_only=['category']`` means 'category' goes
+        only to wide, while other sparse features go to both wide and deep.
+        
+        Note: For multi-sparse features, if any column in a multi-sparse group is
+        specified, the entire group will be treated together.
+    sparse_deep_only : list of str or None, default: None
+        List of sparse feature column names that should only be used in the deep part.
+        Features not in this list will be used in both wide and deep parts (unless
+        specified in sparse_wide_only).
+        If None, no sparse features are deep-only.
+        
+        Example: ``sparse_deep_only=['tags']`` means 'tags' goes
+        only to deep, while other sparse features go to both wide and deep.
+        
+        Note: For multi-sparse features, if any column in a multi-sparse group is
+        specified, the entire group will be treated together.
+        
+        Note: A feature cannot be in both sparse_wide_only and sparse_deep_only.
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -113,7 +137,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
 
     user_variables = ("embedding/user_wide_var", "embedding/user_deep_var")
     item_variables = ("embedding/item_wide_var", "embedding/item_deep_var")
-    sparse_variables = ("embedding/sparse_wide_var", "embedding/sparse_deep_var")
+    sparse_variables = ("embedding/sparse_wide_var", "embedding/sparse_deep_var", "embedding/sparse_wide_only_var", "embedding/sparse_deep_only_var")
     dense_variables = ("embedding/dense_wide_var", "embedding/dense_deep_var", "embedding/dense_wide_only_var", "embedding/dense_deep_only_var")
 
     def __init__(
@@ -136,6 +160,8 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         multi_sparse_combiner="sqrtn",
         dense_wide_only=None,
         dense_deep_only=None,
+        sparse_wide_only=None,
+        sparse_deep_only=None,
         seed=42,
         lower_upper_bound=None,
         tf_sess_config=None,
@@ -158,6 +184,8 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.hidden_units = hidden_units_config(hidden_units)
         self.dense_wide_only = dense_wide_only
         self.dense_deep_only = dense_deep_only
+        self.sparse_wide_only = sparse_wide_only
+        self.sparse_deep_only = sparse_deep_only
         self.seed = seed
         self.sparse = check_sparse_indices(data_info)
         self.dense = check_dense_values(data_info)
@@ -170,6 +198,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             self.true_sparse_field_size = true_sparse_field_size(
                 data_info, self.sparse_field_size, self.multi_sparse_combiner
             )
+            self._setup_sparse_split(data_info)
         if self.dense:
             self.dense_field_size = dense_field_size(data_info)
             self._setup_dense_split(data_info)
@@ -239,31 +268,145 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.wide_embed.extend([wide_user_embed, wide_item_embed])
         self.deep_embed.extend([deep_user_embed, deep_item_embed])
 
+    def _create_split_data_info(self, field_indices):
+        """Create a modified data_info structure for a subset of sparse fields.
+        
+        Adjusts multi_sparse_combine_info field offsets to match the sliced indices.
+        """
+        if not field_indices:
+            return None
+        
+        # Create a mapping from old field index to new field index
+        field_set = set(field_indices)
+        old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted(field_indices))}
+        
+        # Check if we need to adjust multi_sparse_combine_info
+        if not self.data_info.multi_sparse_combine_info:
+            # No multi-sparse, simple case - can use original data_info
+            return self.data_info
+        
+        # Adjust multi_sparse_combine_info
+        original_field_offsets = self.data_info.multi_sparse_combine_info.field_offset
+        original_field_lens = self.data_info.multi_sparse_combine_info.field_len
+        original_feat_oovs = self.data_info.multi_sparse_combine_info.feat_oov
+        
+        new_field_offsets = []
+        new_field_lens = []
+        new_feat_oovs = []
+        
+        # Check each multi-sparse field
+        for field_idx, (offset, length, oov) in enumerate(
+            zip(original_field_offsets, original_field_lens, original_feat_oovs)
+        ):
+            # Check if all columns in this multi-sparse field are in field_indices
+            field_start = offset
+            field_end = offset + length
+            field_col_indices = list(range(field_start, field_end))
+            
+            if all(col_idx in field_set for col_idx in field_col_indices):
+                # All columns present, adjust offset
+                new_offset = old_to_new[field_start]
+                new_field_offsets.append(new_offset)
+                new_field_lens.append(length)
+                new_feat_oovs.append(oov)
+        
+        # Create a new data_info-like object (we'll use a simple object to hold the info)
+        # Actually, since compute_sparse_feats only uses multi_sparse_combine_info,
+        # we can create a minimal wrapper
+        class SplitDataInfo:
+            def __init__(self, original_data_info, multi_sparse_info):
+                self.multi_sparse_combine_info = multi_sparse_info
+                # Copy other attributes we might need
+                self.sparse_unique_vals = original_data_info.sparse_unique_vals
+                self.multi_sparse_unique_vals = original_data_info.multi_sparse_unique_vals
+                self.col_name_mapping = original_data_info.col_name_mapping
+        
+        if new_field_offsets:
+            from ..data.data_info import MultiSparseInfo
+            new_multi_sparse_info = MultiSparseInfo(
+                new_field_offsets,
+                new_field_lens,
+                np.array(new_feat_oovs),
+                self.data_info.multi_sparse_combine_info.pad_val
+            )
+            return SplitDataInfo(self.data_info, new_multi_sparse_info)
+        else:
+            # No multi-sparse fields in this split
+            return SplitDataInfo(self.data_info, None)
+
     def _build_sparse(self):
         self.sparse_indices = tf.placeholder(
             tf.int32, shape=[None, self.sparse_field_size]
         )
-        wide_sparse_embed = compute_sparse_feats(
-            self.data_info,
-            self.multi_sparse_combiner,
-            self.sparse_indices,
-            var_name="sparse_wide_var",
-            var_shape=[self.sparse_feature_size],
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-        )
-        deep_sparse_embed = compute_sparse_feats(
-            self.data_info,
-            self.multi_sparse_combiner,
-            self.sparse_indices,
-            var_name="sparse_deep_var",
-            var_shape=(self.sparse_feature_size, self.embed_size),
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-            flatten=True,
-        )
-        self.wide_embed.append(wide_sparse_embed)
-        self.deep_embed.append(deep_sparse_embed)
+        
+        # Split sparse indices into wide-only, deep-only, and both-network groups
+        has_wide_only = len(self.sparse_wide_only_indices) > 0
+        has_deep_only = len(self.sparse_deep_only_indices) > 0
+        has_both = len(self.sparse_both_indices) > 0
+        
+        if has_wide_only:
+            # Features that go only to wide network
+            wide_only_indices = tf.constant(self.sparse_wide_only_indices, dtype=tf.int32)
+            sparse_wide_only_indices_tensor = tf.gather(self.sparse_indices, wide_only_indices, axis=1)
+            split_data_info_wide = self._create_split_data_info(self.sparse_wide_only_indices)
+            
+            wide_only_embed = compute_sparse_feats(
+                split_data_info_wide,
+                self.multi_sparse_combiner,
+                sparse_wide_only_indices_tensor,
+                var_name="sparse_wide_only_var",
+                var_shape=[self.sparse_feature_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.wide_embed.append(wide_only_embed)
+        
+        if has_deep_only:
+            # Features that go only to deep network
+            deep_only_indices = tf.constant(self.sparse_deep_only_indices, dtype=tf.int32)
+            sparse_deep_only_indices_tensor = tf.gather(self.sparse_indices, deep_only_indices, axis=1)
+            split_data_info_deep = self._create_split_data_info(self.sparse_deep_only_indices)
+            
+            deep_only_embed = compute_sparse_feats(
+                split_data_info_deep,
+                self.multi_sparse_combiner,
+                sparse_deep_only_indices_tensor,
+                var_name="sparse_deep_only_var",
+                var_shape=(self.sparse_feature_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+                flatten=True,
+            )
+            self.deep_embed.append(deep_only_embed)
+        
+        if has_both:
+            # Features that go to both wide and deep networks
+            both_indices = tf.constant(self.sparse_both_indices, dtype=tf.int32)
+            sparse_both_indices_tensor = tf.gather(self.sparse_indices, both_indices, axis=1)
+            split_data_info_both = self._create_split_data_info(self.sparse_both_indices)
+            
+            wide_sparse_embed = compute_sparse_feats(
+                split_data_info_both,
+                self.multi_sparse_combiner,
+                sparse_both_indices_tensor,
+                var_name="sparse_wide_var",
+                var_shape=[self.sparse_feature_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.wide_embed.append(wide_sparse_embed)
+            
+            deep_sparse_embed = compute_sparse_feats(
+                split_data_info_both,
+                self.multi_sparse_combiner,
+                sparse_both_indices_tensor,
+                var_name="sparse_deep_var",
+                var_shape=(self.sparse_feature_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+                flatten=True,
+            )
+            self.deep_embed.append(deep_sparse_embed)
 
     def _setup_dense_split(self, data_info):
         """Setup indices for splitting dense features between wide-only, deep-only, and both networks."""
@@ -299,6 +442,80 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         ]
         self.dense_both_indices = [
             i for i, name in enumerate(dense_col_names) 
+            if name not in wide_only_set and name not in deep_only_set
+        ]
+
+    def _setup_sparse_split(self, data_info):
+        """Setup indices for splitting sparse features between wide-only, deep-only, and both networks.
+        
+        Handles multi-sparse features by ensuring all columns in a multi-sparse group
+        are treated together.
+        """
+        sparse_col_names = data_info.sparse_col.name
+        
+        wide_only_set = set(self.sparse_wide_only) if self.sparse_wide_only else set()
+        deep_only_set = set(self.sparse_deep_only) if self.sparse_deep_only else set()
+        
+        # Validate no overlap
+        overlap = wide_only_set & deep_only_set
+        if overlap:
+            raise ValueError(
+                f"Features cannot be in both sparse_wide_only and sparse_deep_only: {overlap}"
+            )
+        
+        # Validate column names
+        all_specified = wide_only_set | deep_only_set
+        invalid_cols = all_specified - set(sparse_col_names)
+        if invalid_cols:
+            raise ValueError(
+                f"sparse_wide_only/sparse_deep_only contains invalid column names: {invalid_cols}. "
+                f"Valid sparse columns are: {sparse_col_names}"
+            )
+        
+        # Handle multi-sparse: if any column in a multi-sparse group is specified,
+        # include all columns in that group
+        if data_info.multi_sparse_combine_info:
+            multi_sparse_map = data_info.col_name_mapping.get("multi_sparse", {})
+            # Map each column to its main multi-sparse column (if it's part of one)
+            col_to_main = {}
+            for sub_col, main_col in multi_sparse_map.items():
+                col_to_main[sub_col] = main_col
+                col_to_main[main_col] = main_col  # main column maps to itself
+            
+            # Expand wide_only_set and deep_only_set to include all columns in multi-sparse groups
+            expanded_wide_only = set(wide_only_set)
+            expanded_deep_only = set(deep_only_set)
+            
+            for col in list(wide_only_set):
+                if col in col_to_main:
+                    main_col = col_to_main[col]
+                    # Find all columns in this multi-sparse group
+                    for sparse_col in sparse_col_names:
+                        if sparse_col == main_col or col_to_main.get(sparse_col) == main_col:
+                            expanded_wide_only.add(sparse_col)
+            
+            for col in list(deep_only_set):
+                if col in col_to_main:
+                    main_col = col_to_main[col]
+                    # Find all columns in this multi-sparse group
+                    for sparse_col in sparse_col_names:
+                        if sparse_col == main_col or col_to_main.get(sparse_col) == main_col:
+                            expanded_deep_only.add(sparse_col)
+            
+            wide_only_set = expanded_wide_only
+            deep_only_set = expanded_deep_only
+        
+        # Get field indices for each group
+        self.sparse_wide_only_indices = [
+            i for i, name in enumerate(sparse_col_names) 
+            if name in wide_only_set
+        ]
+        self.sparse_deep_only_indices = [
+            i for i, name in enumerate(sparse_col_names) 
+            if name in deep_only_set
+        ]
+        self.sparse_both_indices = [
+            i for i, name in enumerate(sparse_col_names) 
             if name not in wide_only_set and name not in deep_only_set
         ]
 

@@ -69,6 +69,24 @@ class DeepFM(TfBase, metaclass=ModelMeta):
 
     multi_sparse_combiner : {'normal', 'mean', 'sum', 'sqrtn'}, default: 'sqrtn'
         Options for combining `multi_sparse` features.
+    dense_linear_only : list of str or None, default: None
+        List of dense feature column names that should only be used in the linear part.
+        Features not in this list will be used in linear, CIN, and deep parts (unless
+        specified in dense_deep_only).
+        If None, no dense features are linear-only.
+        
+        Example: ``dense_linear_only=['age', 'income']`` means 'age' and 'income' go
+        only to linear, while other dense features go to all parts.
+    dense_deep_only : list of str or None, default: None
+        List of dense feature column names that should only be used in the deep and CIN parts
+        (not linear). Features not in this list will be used in all parts (unless
+        specified in dense_linear_only).
+        If None, no dense features are deep-only.
+        
+        Example: ``dense_deep_only=['embedding_feat']`` means 'embedding_feat' goes
+        only to CIN and deep, while other dense features go to all parts.
+        
+        Note: A feature cannot be in both dense_linear_only and dense_deep_only.
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -86,7 +104,7 @@ class DeepFM(TfBase, metaclass=ModelMeta):
     user_variables = ("embedding/user_linear_var", "embedding/user_embeds_var")
     item_variables = ("embedding/item_linear_var", "embedding/item_embeds_var")
     sparse_variables = ("embedding/sparse_linear_var", "embedding/sparse_embeds_var")
-    dense_variables = ("embedding/dense_linear_var", "embedding/dense_embeds_var")
+    dense_variables = ("embedding/dense_linear_var", "embedding/dense_embeds_var", "embedding/dense_linear_only_var", "embedding/dense_deep_only_var")
 
     def __init__(
         self,
@@ -106,6 +124,8 @@ class DeepFM(TfBase, metaclass=ModelMeta):
         dropout_rate=None,
         hidden_units=(128, 64, 32),
         multi_sparse_combiner="sqrtn",
+        dense_linear_only=None,
+        dense_deep_only=None,
         seed=42,
         lower_upper_bound=None,
         tf_sess_config=None,
@@ -126,6 +146,8 @@ class DeepFM(TfBase, metaclass=ModelMeta):
         self.use_bn = use_bn
         self.dropout_rate = dropout_config(dropout_rate)
         self.hidden_units = hidden_units_config(hidden_units)
+        self.dense_linear_only = dense_linear_only
+        self.dense_deep_only = dense_deep_only
         self.seed = seed
         self.sparse = check_sparse_indices(data_info)
         self.dense = check_dense_values(data_info)
@@ -140,6 +162,7 @@ class DeepFM(TfBase, metaclass=ModelMeta):
             )
         if self.dense:
             self.dense_field_size = dense_field_size(data_info)
+            self._setup_dense_split(data_info)
 
     def build_model(self):
         tf.set_random_seed(self.seed)
@@ -168,6 +191,7 @@ class DeepFM(TfBase, metaclass=ModelMeta):
             use_bn=self.use_bn,
             dropout_rate=self.dropout_rate,
             is_training=self.is_training,
+            name="deep",
         )
 
         concat_layer = tf.concat([linear_term, pairwise_term, deep_term], axis=1)
@@ -241,25 +265,112 @@ class DeepFM(TfBase, metaclass=ModelMeta):
         self.pairwise_embed.append(pairwise_sparse_embed)
         self.deep_embed.append(deep_sparse_embed)
 
+    def _setup_dense_split(self, data_info):
+        """Setup indices for splitting dense features between linear-only, deep-only, and all parts."""
+        dense_col_names = data_info.dense_col.name
+        
+        linear_only_set = set(self.dense_linear_only) if self.dense_linear_only else set()
+        deep_only_set = set(self.dense_deep_only) if self.dense_deep_only else set()
+        
+        # Validate no overlap
+        overlap = linear_only_set & deep_only_set
+        if overlap:
+            raise ValueError(
+                f"Features cannot be in both dense_linear_only and dense_deep_only: {overlap}"
+            )
+        
+        # Validate column names
+        all_specified = linear_only_set | deep_only_set
+        invalid_cols = all_specified - set(dense_col_names)
+        if invalid_cols:
+            raise ValueError(
+                f"dense_linear_only/dense_deep_only contains invalid column names: {invalid_cols}. "
+                f"Valid dense columns are: {dense_col_names}"
+            )
+        
+        # Get indices for each group
+        self.dense_linear_only_indices = [
+            i for i, name in enumerate(dense_col_names) 
+            if name in linear_only_set
+        ]
+        self.dense_deep_only_indices = [
+            i for i, name in enumerate(dense_col_names) 
+            if name in deep_only_set
+        ]
+        self.dense_all_indices = [
+            i for i, name in enumerate(dense_col_names) 
+            if name not in linear_only_set and name not in deep_only_set
+        ]
+
     def _build_dense(self):
         self.dense_values = tf.placeholder(
             tf.float32, shape=[None, self.dense_field_size]
         )
-        linear_dense_embed = compute_dense_feats(
-            self.dense_values,
-            var_name="dense_linear_var",
-            var_shape=[self.dense_field_size],
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-        )
-        pairwise_dense_embed = compute_dense_feats(
-            self.dense_values,
-            var_name="dense_embeds_var",
-            var_shape=(self.dense_field_size, self.embed_size),
-            initializer=tf.glorot_uniform_initializer(),
-            regularizer=self.reg,
-        )
-        deep_dense_embed = tf.keras.layers.Flatten()(pairwise_dense_embed)
-        self.linear_embed.append(linear_dense_embed)
-        self.pairwise_embed.append(pairwise_dense_embed)
-        self.deep_embed.append(deep_dense_embed)
+        
+        # Split dense values into linear-only, deep-only, and all-parts groups
+        has_linear_only = len(self.dense_linear_only_indices) > 0
+        has_deep_only = len(self.dense_deep_only_indices) > 0
+        has_all = len(self.dense_all_indices) > 0
+        
+        if has_linear_only:
+            # Features that go only to linear part
+            linear_only_indices = tf.constant(self.dense_linear_only_indices, dtype=tf.int32)
+            dense_linear_only_values = tf.gather(self.dense_values, linear_only_indices, axis=1)
+            linear_only_size = len(self.dense_linear_only_indices)
+            
+            linear_only_embed = compute_dense_feats(
+                dense_linear_only_values,
+                var_name="dense_linear_only_var",
+                var_shape=[linear_only_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.linear_embed.append(linear_only_embed)
+        
+        if has_deep_only:
+            # Features that go only to pairwise and deep parts (not linear)
+            deep_only_indices = tf.constant(self.dense_deep_only_indices, dtype=tf.int32)
+            dense_deep_only_values = tf.gather(self.dense_values, deep_only_indices, axis=1)
+            deep_only_size = len(self.dense_deep_only_indices)
+            
+            pairwise_deep_only_embed = compute_dense_feats(
+                dense_deep_only_values,
+                var_name="dense_deep_only_var",
+                var_shape=(deep_only_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            
+            # For deep: flatten
+            deep_only_deep_embed = tf.keras.layers.Flatten()(pairwise_deep_only_embed)
+            
+            self.pairwise_embed.append(pairwise_deep_only_embed)
+            self.deep_embed.append(deep_only_deep_embed)
+        
+        if has_all:
+            # Features that go to all parts (linear, pairwise, deep)
+            all_indices = tf.constant(self.dense_all_indices, dtype=tf.int32)
+            dense_all_values = tf.gather(self.dense_values, all_indices, axis=1)
+            all_size = len(self.dense_all_indices)
+            
+            linear_dense_embed = compute_dense_feats(
+                dense_all_values,
+                var_name="dense_linear_var",
+                var_shape=[all_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            pairwise_dense_embed = compute_dense_feats(
+                dense_all_values,
+                var_name="dense_embeds_var",
+                var_shape=(all_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            
+            # For deep: flatten
+            deep_dense_embed = tf.keras.layers.Flatten()(pairwise_dense_embed)
+            
+            self.linear_embed.append(linear_dense_embed)
+            self.pairwise_embed.append(pairwise_dense_embed)
+            self.deep_embed.append(deep_dense_embed)
