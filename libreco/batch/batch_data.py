@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler, WeightedRandomSampler
 
 from .collators import BaseCollator as NormalCollator
 from .collators import (
@@ -121,7 +121,23 @@ def get_batch_loader(model, data, neg_sampling, batch_size, shuffle, num_workers
         batch_data = BatchData(data, use_features, factor)
         collate_fn = get_collate_fn(model, neg_sampling, num_workers)
 
-    sampler = RandomSampler(batch_data) if shuffle else SequentialSampler(batch_data)
+    # Check for positive sampler (weighted sampling for unpopular items)
+    pos_sampler = getattr(model, "pos_sampler", "random")
+    
+    if shuffle:
+        if pos_sampler == "unpopular":
+            # Compute sample weights: 1/sqrt(item_count) - same as WMSE
+            sample_weights = _compute_sample_weights(data.item_indices, model.n_items)
+            sampler = WeightedRandomSampler(
+                weights=sample_weights,
+                num_samples=len(batch_data),
+                replacement=True,
+            )
+        else:
+            sampler = RandomSampler(batch_data)
+    else:
+        sampler = SequentialSampler(batch_data)
+    
     batch_sampler = BatchSampler(sampler, batch_size=batch_size, drop_last=False)
     return DataLoader(
         batch_data,
@@ -130,6 +146,39 @@ def get_batch_loader(model, data, neg_sampling, batch_size, shuffle, num_workers
         collate_fn=collate_fn,
         num_workers=num_workers,
     )
+
+
+def _compute_sample_weights(item_indices, n_items):
+    """Compute sample weights inversely proportional to item frequency.
+    
+    Uses the same weighting as WMSE: weight = 1 / sqrt(count).
+    Low-volume items get higher sampling probability.
+    
+    Parameters
+    ----------
+    item_indices : array-like
+        Item indices for all training samples.
+    n_items : int
+        Total number of items.
+    
+    Returns
+    -------
+    torch.Tensor
+        Weight for each training sample.
+    """
+    # Count frequency of each item
+    item_counts = np.bincount(item_indices, minlength=n_items).astype(np.float32)
+    
+    # Handle zero counts
+    item_counts[item_counts == 0] = 1.0
+    
+    # Compute weight per item: 1 / sqrt(count)
+    item_weights = 1.0 / np.sqrt(item_counts)
+    
+    # Get weight for each sample based on its item
+    sample_weights = item_weights[item_indices]
+    
+    return torch.from_numpy(sample_weights)
 
 
 def get_collate_fn(model, neg_sampling, num_workers):

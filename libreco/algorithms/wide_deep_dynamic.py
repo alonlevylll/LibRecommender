@@ -128,6 +128,14 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
     n_preference_items : int, default: 50
         Number of top items to track for each preference type (liked/unliked).
         Total feature dimension will be 2 * n_preference_items.
+    pos_sampler : {'random', 'unpopular'}, default: 'random'
+        Positive example sampling strategy.
+
+        - ``'random'`` means uniform random sampling of training examples.
+        - ``'unpopular'`` oversamples low-volume items using weight = 1/sqrt(count),
+          the same weighting scheme as WMSE loss. This helps the model learn better
+          representations for items with few interactions.
+
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -180,6 +188,7 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         use_user_rating_stats=False,
         use_user_preference_sparse=False,
         n_preference_items=50,
+        pos_sampler="random",
         seed=42,
         lower_upper_bound=None,
         tf_sess_config=None,
@@ -206,7 +215,14 @@ class WideDeepDynamic(TfBase, metaclass=ModelMeta):
         self.use_user_rating_stats = use_user_rating_stats
         self.use_user_preference_sparse = use_user_preference_sparse
         self.n_preference_items = n_preference_items
+        self.pos_sampler = pos_sampler
         self.seed = seed
+        
+        # Validate pos_sampler
+        if pos_sampler not in ("random", "unpopular"):
+            raise ValueError(
+                f"`pos_sampler` must be one of ('random', 'unpopular'), got {pos_sampler}"
+            )
         
         # Will be set in fit() for user preference sparse feature
         self.top_liked_items = None

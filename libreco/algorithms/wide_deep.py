@@ -114,6 +114,14 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         specified, the entire group will be treated together.
         
         Note: A feature cannot be in both sparse_wide_only and sparse_deep_only.
+    pos_sampler : {'random', 'unpopular'}, default: 'random'
+        Positive example sampling strategy.
+
+        - ``'random'`` means uniform random sampling of training examples.
+        - ``'unpopular'`` oversamples low-volume items using weight = 1/sqrt(count),
+          the same weighting scheme as WMSE loss. This helps the model learn better
+          representations for items with few interactions.
+
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -162,6 +170,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         dense_deep_only=None,
         sparse_wide_only=None,
         sparse_deep_only=None,
+        pos_sampler="random",
         seed=42,
         lower_upper_bound=None,
         tf_sess_config=None,
@@ -186,7 +195,14 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.dense_deep_only = dense_deep_only
         self.sparse_wide_only = sparse_wide_only
         self.sparse_deep_only = sparse_deep_only
+        self.pos_sampler = pos_sampler
         self.seed = seed
+        
+        # Validate pos_sampler
+        if pos_sampler not in ("random", "unpopular"):
+            raise ValueError(
+                f"`pos_sampler` must be one of ('random', 'unpopular'), got {pos_sampler}"
+            )
         self.sparse = check_sparse_indices(data_info)
         self.dense = check_dense_values(data_info)
         if self.sparse:
