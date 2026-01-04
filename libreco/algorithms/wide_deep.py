@@ -114,6 +114,12 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         specified, the entire group will be treated together.
         
         Note: A feature cannot be in both sparse_wide_only and sparse_deep_only.
+    interaction_wide_only : list of str or None, default: None
+        List of interaction-level sparse feature column names that should only be
+        used in the wide part. If None, all interaction sparse features go to both.
+    interaction_deep_only : list of str or None, default: None
+        List of interaction-level sparse feature column names that should only be
+        used in the deep part. If None, all interaction sparse features go to both.
     pos_sampler : {'random', 'unpopular'}, default: 'random'
         Positive example sampling strategy.
 
@@ -147,6 +153,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
     item_variables = ("embedding/item_wide_var", "embedding/item_deep_var")
     sparse_variables = ("embedding/sparse_wide_var", "embedding/sparse_deep_var", "embedding/sparse_wide_only_var", "embedding/sparse_deep_only_var")
     dense_variables = ("embedding/dense_wide_var", "embedding/dense_deep_var", "embedding/dense_wide_only_var", "embedding/dense_deep_only_var")
+    interaction_variables = ("embedding/interaction_sparse_wide_var", "embedding/interaction_sparse_deep_var", "embedding/interaction_dense_wide_var", "embedding/interaction_dense_deep_var")
 
     def __init__(
         self,
@@ -170,6 +177,8 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         dense_deep_only=None,
         sparse_wide_only=None,
         sparse_deep_only=None,
+        interaction_wide_only=None,
+        interaction_deep_only=None,
         pos_sampler="random",
         seed=42,
         lower_upper_bound=None,
@@ -195,6 +204,8 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.dense_deep_only = dense_deep_only
         self.sparse_wide_only = sparse_wide_only
         self.sparse_deep_only = sparse_deep_only
+        self.interaction_wide_only = interaction_wide_only
+        self.interaction_deep_only = interaction_deep_only
         self.pos_sampler = pos_sampler
         self.seed = seed
         
@@ -218,6 +229,23 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         if self.dense:
             self.dense_field_size = dense_field_size(data_info)
             self._setup_dense_split(data_info)
+        
+        # Check for interaction features
+        self.interaction_sparse = (
+            len(data_info.interaction_sparse_col.name) > 0 
+            if hasattr(data_info, 'interaction_sparse_unique_vals') and data_info.interaction_sparse_unique_vals 
+            else False
+        )
+        self.interaction_dense = (
+            hasattr(data_info, 'n_interaction_dense') and data_info.n_interaction_dense > 0
+        )
+        if self.interaction_sparse:
+            self.interaction_sparse_field_size = len(data_info.interaction_sparse_col.name)
+            self.interaction_sparse_feature_size = data_info.n_interaction_sparse
+            self._setup_interaction_sparse_split(data_info)
+        if self.interaction_dense:
+            self.interaction_dense_field_size = data_info.n_interaction_dense
+            self._setup_interaction_dense_split(data_info)
 
     def build_model(self):
         tf.set_random_seed(self.seed)
@@ -230,6 +258,10 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             self._build_sparse()
         if self.dense:
             self._build_dense()
+        if self.interaction_sparse:
+            self._build_interaction_sparse()
+        if self.interaction_dense:
+            self._build_interaction_dense()
 
         wide_embed = tf.concat(self.wide_embed, axis=1)
         wide_term = tf_dense(units=1, name="wide_term")(wide_embed)
@@ -535,6 +567,66 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             if name not in wide_only_set and name not in deep_only_set
         ]
 
+    def _setup_interaction_sparse_split(self, data_info):
+        """Setup indices for splitting interaction sparse features between wide-only, deep-only, and both networks."""
+        interaction_sparse_col_names = data_info.interaction_sparse_col.name
+        
+        wide_only_set = set(self.interaction_wide_only) if self.interaction_wide_only else set()
+        deep_only_set = set(self.interaction_deep_only) if self.interaction_deep_only else set()
+        
+        # Validate no overlap
+        overlap = wide_only_set & deep_only_set
+        if overlap:
+            raise ValueError(
+                f"Features cannot be in both interaction_wide_only and interaction_deep_only: {overlap}"
+            )
+        
+        # Validate column names - only check interaction sparse columns
+        all_specified = wide_only_set | deep_only_set
+        valid_cols = set(interaction_sparse_col_names)
+        # Only validate sparse columns (dense columns would be in interaction_dense)
+        invalid_sparse_cols = (all_specified & valid_cols) - valid_cols
+        if invalid_sparse_cols:
+            raise ValueError(
+                f"interaction_wide_only/interaction_deep_only contains invalid sparse column names: {invalid_sparse_cols}. "
+                f"Valid interaction sparse columns are: {interaction_sparse_col_names}"
+            )
+        
+        # Get indices for each group
+        self.interaction_sparse_wide_only_indices = [
+            i for i, name in enumerate(interaction_sparse_col_names) 
+            if name in wide_only_set
+        ]
+        self.interaction_sparse_deep_only_indices = [
+            i for i, name in enumerate(interaction_sparse_col_names) 
+            if name in deep_only_set
+        ]
+        self.interaction_sparse_both_indices = [
+            i for i, name in enumerate(interaction_sparse_col_names) 
+            if name not in wide_only_set and name not in deep_only_set
+        ]
+
+    def _setup_interaction_dense_split(self, data_info):
+        """Setup indices for splitting interaction dense features between wide-only, deep-only, and both networks."""
+        interaction_dense_col_names = data_info.interaction_dense_col.name
+        
+        wide_only_set = set(self.interaction_wide_only) if self.interaction_wide_only else set()
+        deep_only_set = set(self.interaction_deep_only) if self.interaction_deep_only else set()
+        
+        # Get indices for each group (filter to only dense columns)
+        self.interaction_dense_wide_only_indices = [
+            i for i, name in enumerate(interaction_dense_col_names) 
+            if name in wide_only_set
+        ]
+        self.interaction_dense_deep_only_indices = [
+            i for i, name in enumerate(interaction_dense_col_names) 
+            if name in deep_only_set
+        ]
+        self.interaction_dense_both_indices = [
+            i for i, name in enumerate(interaction_dense_col_names) 
+            if name not in wide_only_set and name not in deep_only_set
+        ]
+
     def _build_dense(self):
         self.dense_values = tf.placeholder(
             tf.float32, shape=[None, self.dense_field_size]
@@ -600,6 +692,136 @@ class WideDeep(TfBase, metaclass=ModelMeta):
                 flatten=True,
             )
             self.deep_embed.append(deep_dense_embed)
+
+    def _build_interaction_sparse(self):
+        """Build embeddings for interaction-level sparse features."""
+        self.interaction_sparse_indices = tf.placeholder(
+            tf.int32, shape=[None, self.interaction_sparse_field_size]
+        )
+        
+        has_wide_only = len(self.interaction_sparse_wide_only_indices) > 0
+        has_deep_only = len(self.interaction_sparse_deep_only_indices) > 0
+        has_both = len(self.interaction_sparse_both_indices) > 0
+        
+        if has_wide_only:
+            wide_only_indices = tf.constant(self.interaction_sparse_wide_only_indices, dtype=tf.int32)
+            sparse_wide_only_tensor = tf.gather(self.interaction_sparse_indices, wide_only_indices, axis=1)
+            wide_only_size = len(self.interaction_sparse_wide_only_indices)
+            
+            wide_only_embed = embedding_lookup(
+                indices=tf.reshape(sparse_wide_only_tensor, [-1]),
+                var_name="interaction_sparse_wide_only_var",
+                var_shape=(self.interaction_sparse_feature_size, 1),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            wide_only_embed = tf.reshape(wide_only_embed, [-1, wide_only_size])
+            self.wide_embed.append(wide_only_embed)
+        
+        if has_deep_only:
+            deep_only_indices = tf.constant(self.interaction_sparse_deep_only_indices, dtype=tf.int32)
+            sparse_deep_only_tensor = tf.gather(self.interaction_sparse_indices, deep_only_indices, axis=1)
+            deep_only_size = len(self.interaction_sparse_deep_only_indices)
+            
+            deep_only_embed = embedding_lookup(
+                indices=tf.reshape(sparse_deep_only_tensor, [-1]),
+                var_name="interaction_sparse_deep_only_var",
+                var_shape=(self.interaction_sparse_feature_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            deep_only_embed = tf.reshape(deep_only_embed, [-1, deep_only_size * self.embed_size])
+            self.deep_embed.append(deep_only_embed)
+        
+        if has_both:
+            both_indices = tf.constant(self.interaction_sparse_both_indices, dtype=tf.int32)
+            sparse_both_tensor = tf.gather(self.interaction_sparse_indices, both_indices, axis=1)
+            both_size = len(self.interaction_sparse_both_indices)
+            
+            # Wide embedding
+            wide_both_embed = embedding_lookup(
+                indices=tf.reshape(sparse_both_tensor, [-1]),
+                var_name="interaction_sparse_wide_var",
+                var_shape=(self.interaction_sparse_feature_size, 1),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            wide_both_embed = tf.reshape(wide_both_embed, [-1, both_size])
+            self.wide_embed.append(wide_both_embed)
+            
+            # Deep embedding
+            deep_both_embed = embedding_lookup(
+                indices=tf.reshape(sparse_both_tensor, [-1]),
+                var_name="interaction_sparse_deep_var",
+                var_shape=(self.interaction_sparse_feature_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            deep_both_embed = tf.reshape(deep_both_embed, [-1, both_size * self.embed_size])
+            self.deep_embed.append(deep_both_embed)
+
+    def _build_interaction_dense(self):
+        """Build embeddings for interaction-level dense features."""
+        self.interaction_dense_values = tf.placeholder(
+            tf.float32, shape=[None, self.interaction_dense_field_size]
+        )
+        
+        has_wide_only = len(self.interaction_dense_wide_only_indices) > 0
+        has_deep_only = len(self.interaction_dense_deep_only_indices) > 0
+        has_both = len(self.interaction_dense_both_indices) > 0
+        
+        if has_wide_only:
+            wide_only_indices = tf.constant(self.interaction_dense_wide_only_indices, dtype=tf.int32)
+            dense_wide_only_values = tf.gather(self.interaction_dense_values, wide_only_indices, axis=1)
+            wide_only_size = len(self.interaction_dense_wide_only_indices)
+            
+            wide_only_embed = compute_dense_feats(
+                dense_wide_only_values,
+                var_name="interaction_dense_wide_only_var",
+                var_shape=[wide_only_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.wide_embed.append(wide_only_embed)
+        
+        if has_deep_only:
+            deep_only_indices = tf.constant(self.interaction_dense_deep_only_indices, dtype=tf.int32)
+            dense_deep_only_values = tf.gather(self.interaction_dense_values, deep_only_indices, axis=1)
+            deep_only_size = len(self.interaction_dense_deep_only_indices)
+            
+            deep_only_embed = compute_dense_feats(
+                dense_deep_only_values,
+                var_name="interaction_dense_deep_only_var",
+                var_shape=(deep_only_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+                flatten=True,
+            )
+            self.deep_embed.append(deep_only_embed)
+        
+        if has_both:
+            both_indices = tf.constant(self.interaction_dense_both_indices, dtype=tf.int32)
+            dense_both_values = tf.gather(self.interaction_dense_values, both_indices, axis=1)
+            both_size = len(self.interaction_dense_both_indices)
+            
+            wide_both_embed = compute_dense_feats(
+                dense_both_values,
+                var_name="interaction_dense_wide_var",
+                var_shape=[both_size],
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+            )
+            self.wide_embed.append(wide_both_embed)
+            
+            deep_both_embed = compute_dense_feats(
+                dense_both_values,
+                var_name="interaction_dense_deep_var",
+                var_shape=(both_size, self.embed_size),
+                initializer=tf.glorot_uniform_initializer(),
+                regularizer=self.reg,
+                flatten=True,
+            )
+            self.deep_embed.append(deep_both_embed)
 
     @staticmethod
     def check_lr(lr):

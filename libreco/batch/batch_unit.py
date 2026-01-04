@@ -83,6 +83,8 @@ class PointwiseBatch:
     seqs: Optional[SeqFeats] = None
     user_rating_vectors: Optional[Iterable[float]] = None
     user_rating_stats: Optional[Iterable[float]] = None  # [batch_size, 2] for mean/std
+    interaction_sparse_indices: Optional[Iterable[int]] = None
+    interaction_dense_values: Optional[Iterable[float]] = None
     backend: InitVar[Backend] = None
 
     # todo: For now, no torch model uses sequence feature
@@ -99,6 +101,10 @@ class PointwiseBatch:
                 self.user_rating_vectors = torch.from_numpy(self.user_rating_vectors)
             if self.user_rating_stats is not None:
                 self.user_rating_stats = torch.from_numpy(self.user_rating_stats)
+            if self.interaction_sparse_indices is not None:
+                self.interaction_sparse_indices = torch.from_numpy(self.interaction_sparse_indices)
+            if self.interaction_dense_values is not None:
+                self.interaction_dense_values = torch.from_numpy(self.interaction_dense_values)
 
     def to_device(self, device):  # pragma: no cover
         self.users = self.users.to(device)
@@ -110,6 +116,10 @@ class PointwiseBatch:
             self.dense_values = self.dense_values.to(device)
         if self.user_rating_vectors is not None:
             self.user_rating_vectors = self.user_rating_vectors.to(device)
+        if self.interaction_sparse_indices is not None:
+            self.interaction_sparse_indices = self.interaction_sparse_indices.to(device)
+        if self.interaction_dense_values is not None:
+            self.interaction_dense_values = self.interaction_dense_values.to(device)
         return self
 
 

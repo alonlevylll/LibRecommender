@@ -251,6 +251,8 @@ def get_feed_dict(
     user_interacted_len=None,
     user_rating_vectors=None,
     user_rating_stats=None,
+    interaction_sparse_indices=None,
+    interaction_dense_values=None,
     is_training=False,
 ):
     feed_dict = dict()
@@ -291,6 +293,11 @@ def get_feed_dict(
     # Feed pre-computed stats only when stats enabled but not rating vector or preference sparse
     elif use_rating_stats and not use_rating_vector and not use_preference_sparse and user_rating_stats is not None:
         feed_dict.update({model.user_rating_stats: user_rating_stats})
+    # Interaction-level features
+    if hasattr(model, "interaction_sparse_indices") and interaction_sparse_indices is not None:
+        feed_dict.update({model.interaction_sparse_indices: interaction_sparse_indices})
+    if hasattr(model, "interaction_dense_values") and interaction_dense_values is not None:
+        feed_dict.update({model.interaction_dense_values: interaction_dense_values})
     return feed_dict
 
 

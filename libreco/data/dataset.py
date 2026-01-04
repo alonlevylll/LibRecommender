@@ -392,6 +392,8 @@ class DatasetFeat(_Dataset):
         sparse_col=None,
         dense_col=None,
         multi_sparse_col=None,
+        interaction_sparse_col=None,
+        interaction_dense_col=None,
         unique_feat=False,
         pad_val="missing",
         shuffle=False,
@@ -418,6 +420,12 @@ class DatasetFeat(_Dataset):
             For example, ``[["a", "b", "c"], ["d", "e"]]``
         dense_col : list of str or None, default: None
             List of dense feature column names.
+        interaction_sparse_col : list of str or None, default: None
+            List of interaction-level sparse feature column names. These features
+            vary per interaction row (e.g., time of day, device type, context).
+        interaction_dense_col : list of str or None, default: None
+            List of interaction-level dense feature column names. These features
+            vary per interaction row (e.g., timestamp, session duration).
         unique_feat : bool, default: False
             Whether the features of users and items are unique in train data.
         pad_val : int or str or list, default: "missing"
@@ -482,8 +490,24 @@ class DatasetFeat(_Dataset):
             else sparse_col
         )
         col_name_mapping = col_name2index(
-            user_col, item_col, all_sparse_col, cls.dense_col
+            user_col, item_col, all_sparse_col, cls.dense_col,
+            interaction_sparse_col, interaction_dense_col
         )
+
+        # Process interaction-level features
+        interaction_sparse_indices = None
+        interaction_dense_values = None
+        if interaction_sparse_col:
+            cls.interaction_sparse_unique_vals = _get_sparse_unique_vals(
+                interaction_sparse_col, train_data
+            )
+            interaction_sparse_indices = _transform_interaction_sparse(
+                train_data, interaction_sparse_col, cls.interaction_sparse_unique_vals
+            )
+        if interaction_dense_col:
+            interaction_dense_values = train_data[interaction_dense_col].to_numpy(
+                dtype=np.float32
+            )
         (
             user_sparse_unique,
             user_dense_unique,
@@ -541,6 +565,20 @@ class DatasetFeat(_Dataset):
             multi_sparse_info,
             seed,
         )
+
+        # Add interaction-level features to the TransformedSet
+        train_transformed._interaction_sparse_indices = interaction_sparse_indices
+        train_transformed._interaction_dense_values = interaction_dense_values
+
+        # Store interaction feature metadata in data_info
+        if interaction_sparse_col:
+            data_info.interaction_sparse_unique_vals = cls.interaction_sparse_unique_vals
+            data_info.interaction_sparse_offset = _compute_interaction_sparse_offset(
+                interaction_sparse_col, cls.interaction_sparse_unique_vals
+            )
+        if interaction_dense_col:
+            data_info.n_interaction_dense = len(interaction_dense_col)
+
         cls.train_called = True
         return train_transformed, data_info
 
@@ -1212,3 +1250,64 @@ def _construct_unique_feat_lazy(
         )
 
     return user_sparse_unique, user_dense_unique, item_sparse_unique, item_dense_unique
+
+
+def _transform_interaction_sparse(train_data, interaction_sparse_col, interaction_sparse_unique_vals):
+    """Transform interaction-level sparse features to indices.
+
+    Parameters
+    ----------
+    train_data : pandas.DataFrame
+        Training data with interaction features.
+    interaction_sparse_col : list of str
+        List of interaction sparse column names.
+    interaction_sparse_unique_vals : dict
+        Mapping from column name to unique values array.
+
+    Returns
+    -------
+    numpy.ndarray
+        Interaction sparse indices with shape (n_interactions, n_interaction_sparse_cols).
+    """
+    n_rows = len(train_data)
+    n_cols = len(interaction_sparse_col)
+    indices = np.zeros((n_rows, n_cols), dtype=np.int32)
+
+    # Compute offset for each column
+    cumulative_offset = 0
+    for j, col in enumerate(interaction_sparse_col):
+        unique_vals = interaction_sparse_unique_vals[col]
+        val_to_idx = {v: i for i, v in enumerate(unique_vals)}
+        oov_idx = len(unique_vals)  # OOV position
+
+        col_values = train_data[col].values
+        for i, val in enumerate(col_values):
+            idx = val_to_idx.get(val, oov_idx)
+            indices[i, j] = idx + cumulative_offset
+
+        cumulative_offset += len(unique_vals) + 1  # +1 for OOV
+
+    return indices
+
+
+def _compute_interaction_sparse_offset(interaction_sparse_col, interaction_sparse_unique_vals):
+    """Compute offset for each interaction sparse column.
+
+    Parameters
+    ----------
+    interaction_sparse_col : list of str
+        List of interaction sparse column names.
+    interaction_sparse_unique_vals : dict
+        Mapping from column name to unique values array.
+
+    Returns
+    -------
+    numpy.ndarray
+        Offset for each interaction sparse column.
+    """
+    offsets = []
+    cumulative_offset = 0
+    for col in interaction_sparse_col:
+        offsets.append(cumulative_offset)
+        cumulative_offset += len(interaction_sparse_unique_vals[col]) + 1  # +1 for OOV
+    return np.array(offsets, dtype=np.int32)

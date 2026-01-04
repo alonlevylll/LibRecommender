@@ -171,6 +171,14 @@ def _pointwise_feed_dict(model, data: PointwiseBatch, is_training):
     elif use_rating_stats and not use_rating_vector and not use_preference_sparse and hasattr(data, "user_rating_stats") and data.user_rating_stats is not None:
         feed_dict.update({model.user_rating_stats: data.user_rating_stats})
     
+    # Interaction-level features
+    if hasattr(model, "interaction_sparse") and model.interaction_sparse:
+        if hasattr(data, "interaction_sparse_indices") and data.interaction_sparse_indices is not None:
+            feed_dict.update({model.interaction_sparse_indices: data.interaction_sparse_indices})
+    if hasattr(model, "interaction_dense") and model.interaction_dense:
+        if hasattr(data, "interaction_dense_values") and data.interaction_dense_values is not None:
+            feed_dict.update({model.interaction_dense_values: data.interaction_dense_values})
+    
     return feed_dict
 
 

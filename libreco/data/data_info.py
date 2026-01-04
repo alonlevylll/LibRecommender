@@ -251,6 +251,36 @@ class DataInfo:
         )
 
     @property
+    def interaction_sparse_col(self):
+        """Interaction-level sparse column name to index mapping."""
+        if not self.col_name_mapping or "interaction_sparse_col" not in self.col_name_mapping:
+            return EmptyFeature
+        return Feature(
+            name=list(self.col_name_mapping["interaction_sparse_col"].keys()),
+            index=list(self.col_name_mapping["interaction_sparse_col"].values()),
+        )
+
+    @property
+    def interaction_dense_col(self):
+        """Interaction-level dense column name to index mapping."""
+        if not self.col_name_mapping or "interaction_dense_col" not in self.col_name_mapping:
+            return EmptyFeature
+        return Feature(
+            name=list(self.col_name_mapping["interaction_dense_col"].keys()),
+            index=list(self.col_name_mapping["interaction_dense_col"].values()),
+        )
+
+    @property
+    def n_interaction_sparse(self):
+        """Total number of unique values across all interaction sparse columns (for embedding)."""
+        if not hasattr(self, 'interaction_sparse_unique_vals') or not self.interaction_sparse_unique_vals:
+            return 0
+        total = 0
+        for col, vals in self.interaction_sparse_unique_vals.items():
+            total += len(vals) + 1  # +1 for OOV
+        return total
+
+    @property
     def user_col(self):
         """All the user column names, including sparse and dense."""
         if not self.col_name_mapping:

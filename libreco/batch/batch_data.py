@@ -28,6 +28,8 @@ class BatchData(torch.utils.data.Dataset):
         self.labels = data.labels
         self.sparse_indices = data.sparse_indices
         self.dense_values = data.dense_values
+        self.interaction_sparse_indices = getattr(data, 'interaction_sparse_indices', None)
+        self.interaction_dense_values = getattr(data, 'interaction_dense_values', None)
         self.use_features = use_features
         self.factor = factor
         self.is_lazy = False
@@ -42,6 +44,10 @@ class BatchData(torch.utils.data.Dataset):
             batch["sparse"] = self.sparse_indices[idx]
         if self.use_features and self.dense_values is not None:
             batch["dense"] = self.dense_values[idx]
+        if self.use_features and self.interaction_sparse_indices is not None:
+            batch["interaction_sparse"] = self.interaction_sparse_indices[idx]
+        if self.use_features and self.interaction_dense_values is not None:
+            batch["interaction_dense"] = self.interaction_dense_values[idx]
         return batch
 
     def __len__(self):

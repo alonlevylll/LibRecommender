@@ -79,6 +79,13 @@ class BaseCollator:
         user_rating_stats = self.get_user_rating_stats(
             batch["user"], batch["item"], mask_current_item=True
         )
+        # Interaction-level features
+        interaction_sparse_batch = self.get_interaction_features(
+            batch, FeatType.INTERACTION_SPARSE
+        )
+        interaction_dense_batch = self.get_interaction_features(
+            batch, FeatType.INTERACTION_DENSE
+        )
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
         elif self.separate_features:
@@ -94,6 +101,8 @@ class BaseCollator:
             seqs=seq_batch,
             user_rating_vectors=user_rating_vectors,
             user_rating_stats=user_rating_stats,
+            interaction_sparse_indices=interaction_sparse_batch,
+            interaction_dense_values=interaction_dense_batch,
             backend=self.backend,
         )
         return batch_data
@@ -119,6 +128,12 @@ class BaseCollator:
             item_features = features[:, item_col_index] if item_col_index else None
             features = PairFeats(user_features, item_features)
         return features
+
+    def get_interaction_features(self, batch, feat_type):
+        """Get interaction-level features from the batch."""
+        if feat_type.value not in batch:
+            return None
+        return batch[feat_type.value]
 
     def get_seqs(self, user_indices, item_indices):
         if not self.has_seq:

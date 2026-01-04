@@ -29,6 +29,10 @@ class TransformedSet:
         All sparse rows in data, represented in inner id.
     dense_values : numpy.ndarray or None, default: None
         All dense rows in data.
+    interaction_sparse_indices : numpy.ndarray or None, default: None
+        Interaction-level sparse feature indices (one per interaction row).
+    interaction_dense_values : numpy.ndarray or None, default: None
+        Interaction-level dense feature values (one per interaction row).
 
     See Also
     --------
@@ -43,12 +47,16 @@ class TransformedSet:
         labels=None,
         sparse_indices=None,
         dense_values=None,
+        interaction_sparse_indices=None,
+        interaction_dense_values=None,
     ):
         self._user_indices = user_indices
         self._item_indices = item_indices
         self._labels = labels
         self._sparse_indices = sparse_indices
         self._dense_values = dense_values
+        self._interaction_sparse_indices = interaction_sparse_indices
+        self._interaction_dense_values = interaction_dense_values
         self._sparse_interaction = self.construct_sparse()
 
     def construct_sparse(self):
@@ -97,6 +105,16 @@ class TransformedSet:
     def sparse_interaction(self):
         """User-item interaction data, in :class:`scipy.sparse.csr_matrix` format."""
         return self._sparse_interaction
+
+    @property
+    def interaction_sparse_indices(self):
+        """Interaction-level sparse feature indices."""
+        return self._interaction_sparse_indices
+
+    @property
+    def interaction_dense_values(self):
+        """Interaction-level dense feature values."""
+        return self._interaction_dense_values
 
     @property
     def is_lazy(self):

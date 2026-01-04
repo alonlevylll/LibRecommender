@@ -5,7 +5,14 @@ import numpy as np
 
 # format: {column_family_name: {column_name: index}}
 # if no such family, default format would be: {column_family_name: {[]: []}
-def col_name2index(user_col=None, item_col=None, sparse_col=None, dense_col=None):
+def col_name2index(
+    user_col=None,
+    item_col=None,
+    sparse_col=None,
+    dense_col=None,
+    interaction_sparse_col=None,
+    interaction_dense_col=None,
+):
     name_mapping = defaultdict(OrderedDict)
     if sparse_col:
         sparse_col_dict = {col: i for i, col in enumerate(sparse_col)}
@@ -35,6 +42,14 @@ def col_name2index(user_col=None, item_col=None, sparse_col=None, dense_col=None
         item_dense_col = _extract_common_col(dense_col, item_col)
         for col in item_dense_col:
             name_mapping["item_dense_col"].update({col: name_mapping["dense_col"][col]})
+
+    # Interaction-level columns (separate index space from user/item features)
+    if interaction_sparse_col:
+        interaction_sparse_dict = {col: i for i, col in enumerate(interaction_sparse_col)}
+        name_mapping["interaction_sparse_col"].update(interaction_sparse_dict)
+    if interaction_dense_col:
+        interaction_dense_dict = {col: i for i, col in enumerate(interaction_dense_col)}
+        name_mapping["interaction_dense_col"].update(interaction_dense_dict)
 
     return dict(name_mapping)
 
