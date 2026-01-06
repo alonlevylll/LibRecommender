@@ -253,9 +253,14 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
         # X^0: [batch, m, D] - the original field embeddings
         x0 = input_features
         
+        # CRITICAL FIX: Pool X^0 and include in final output
+        # According to xDeepFM paper, original fields should be pooled and concatenated
+        # Pool X^0: [batch, m, D] -> [batch, m] via sum pooling over embedding dimension
+        x0_pooled = tf.reduce_sum(x0, axis=2)  # [batch, field_num]
+        final_results = [x0_pooled]
+        
         # Track number of feature maps in each hidden layer
         hidden_nn_layers = [x0]
-        final_results = []
         
         with tf.variable_scope("cin", reuse=tf.AUTO_REUSE):
             for layer_idx, layer_size in enumerate(self.cin_layer_size):
@@ -325,7 +330,8 @@ class xDeepFM(TfBase, metaclass=ModelMeta):
                 if next_hidden is not None:
                     hidden_nn_layers.append(next_hidden)
         
-        # Concatenate all pooled results: [batch, sum(layer_sizes) or sum(split_sizes)]
+        # Concatenate all pooled results: [batch, field_num + sum(layer_sizes) or sum(split_sizes)]
+        # Note: field_num comes from X^0 pooling, rest from CIN layers
         result = tf.concat(final_results, axis=1)
         return result
 
