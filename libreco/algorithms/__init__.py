@@ -9,6 +9,7 @@ from .din import DIN
 from .fm import FM
 from .graphsage import GraphSage
 from .graphsage_dgl import GraphSageDGL
+from .igmc import IGMC
 from .item2vec import Item2Vec
 from .item_cf import ItemCF
 from .item_cf_rs import RsItemCF
@@ -58,6 +59,7 @@ __all__ = [
     "DeepWalk",
     "NGCF",
     "LightGCN",
+    "IGMC",
     "PinSage",
     "PinSageDGL",
     "GraphSage",
