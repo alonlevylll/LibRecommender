@@ -10,6 +10,7 @@ from .preprocess import (
     get_cached_seqs,
     get_original_feats,
     set_temp_feats,
+    set_temp_feats_from_dataframe,
 )
 from ..tfops.features import get_dual_seq_feed_dict, get_feed_dict
 from ..utils.validate import check_unknown
@@ -131,11 +132,22 @@ def predict_tf_feat(model, user, item, feats, cold_start, inner_id):
     ) = get_original_feats(model.data_info, user, item, has_sparse, has_dense)
 
     if feats is not None:
-        assert isinstance(feats, dict), "`feats` must be `dict`."
-        assert len(user_indices) == 1, "Predict with feats only supports single user."
-        sparse_indices, dense_values = set_temp_feats(
-            model.data_info, sparse_indices, dense_values, feats
-        )
+        if isinstance(feats, dict):
+            # Single user with dict features (original behavior)
+            assert len(user_indices) == 1, "Predict with dict feats only supports single user."
+            sparse_indices, dense_values = set_temp_feats(
+                model.data_info, sparse_indices, dense_values, feats
+            )
+        elif isinstance(feats, pd.DataFrame):
+            # Batch predictions with DataFrame features (vectorized)
+            assert len(feats) == len(user_indices), (
+                f"DataFrame length ({len(feats)}) must match number of user-item pairs ({len(user_indices)})"
+            )
+            sparse_indices, dense_values = set_temp_feats_from_dataframe(
+                model.data_info, sparse_indices, dense_values, feats
+            )
+        else:
+            raise TypeError("`feats` must be a dict (single user) or DataFrame (batch)")
 
     # Get user rating vectors/stats for inference (without masking)
     user_rating_vectors = get_user_rating_vectors_for_inference(model, user_indices)

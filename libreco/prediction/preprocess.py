@@ -74,6 +74,56 @@ def set_temp_feats(data_info, sparse_indices, dense_values, feat_dict):
     return sparse_indices_copy, dense_values_copy
 
 
+def set_temp_feats_from_dataframe(data_info, sparse_indices, dense_values, feats_df):
+    """Set temporary features from a DataFrame for batch predictions.
+
+    This function allows passing features for multiple user-item pairs at once
+    via a DataFrame, enabling vectorized batch predictions with custom features.
+    
+    Parameters
+    ----------
+    data_info : DataInfo
+        Data info object containing feature mappings.
+    sparse_indices : np.ndarray or None
+        Original sparse feature indices [batch_size, n_sparse_feats].
+    dense_values : np.ndarray or None  
+        Original dense feature values [batch_size, n_dense_feats].
+    feats_df : pd.DataFrame
+        DataFrame with feature columns. Each row corresponds to a user-item pair.
+        Column names should match the feature names used during training.
+        
+    Returns
+    -------
+    sparse_indices_copy : np.ndarray or None
+        Updated sparse feature indices.
+    dense_values_copy : np.ndarray or None
+        Updated dense feature values.
+    """
+    import pandas as pd
+    assert isinstance(feats_df, pd.DataFrame), "`feats_df` must be a pandas DataFrame"
+    
+    sparse_indices_copy = None if sparse_indices is None else sparse_indices.copy()
+    dense_values_copy = None if dense_values is None else dense_values.copy()
+    
+    # Update sparse features from DataFrame
+    if sparse_indices_copy is not None and "sparse_col" in data_info.col_name_mapping:
+        sparse_col_mapping = data_info.col_name_mapping["sparse_col"]
+        for col, field_idx in sparse_col_mapping.items():
+            if col in feats_df.columns:
+                sparse_indices_copy[:, field_idx] = _compute_sparse_feat_indices(
+                    data_info, feats_df, field_idx, col
+                )
+    
+    # Update dense features from DataFrame
+    if dense_values_copy is not None and "dense_col" in data_info.col_name_mapping:
+        dense_col_mapping = data_info.col_name_mapping["dense_col"]
+        for col, field_idx in dense_col_mapping.items():
+            if col in feats_df.columns:
+                dense_values_copy[:, field_idx] = feats_df[col].to_numpy(dtype=np.float32)
+    
+    return sparse_indices_copy, dense_values_copy
+
+
 def _set_sparse_indices(
     sparse_indices, col_mapping, sparse_idx_mapping, offsets, feat_dict
 ):
