@@ -5,7 +5,7 @@ from ..bases import ModelMeta, TfBase
 from ..feature.multi_sparse import true_sparse_field_size
 from ..layers import dense_nn, embedding_lookup, tf_dense
 from ..tfops import dropout_config, reg_config, tf
-from ..tfops.features import compute_dense_feats, compute_sparse_feats
+from ..tfops.features import compute_dense_feats, compute_sparse_feats, get_feed_dict
 from ..torchops import hidden_units_config
 from ..utils.misc import count_params
 from ..utils.validate import (
@@ -27,9 +27,22 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         Recommendation task. See :ref:`Task`.
     data_info : :class:`~libreco.data.DataInfo` object
         Object that contains useful information for training and inference.
-    loss_type : {'cross_entropy', 'focal', 'wmse'}, default: 'cross_entropy'
-        Loss for model training. For rating task, 'wmse' (Weighted Mean Squared Error)
-        can be used to weight items by their frequency in the training data.
+    loss_type : {'cross_entropy', 'focal', 'wmse', 'softmax'}, default: 'cross_entropy'
+        Loss for model training.
+        
+        - For **ranking** task: 'cross_entropy', 'focal'
+        - For **rating** task: 'mse' (default), 'wmse', 'softmax'
+        
+        The **'softmax'** loss treats rating prediction as a multi-class classification
+        problem. Ratings are discretized into classes (e.g., 0.5, 1.0, 1.5, ..., 5.0)
+        and the model outputs a probability distribution over all rating classes.
+        
+        .. note::
+           When using ``loss_type='softmax'`` for rating task:
+           
+           - Prediction returns the rating with highest probability (argmax)
+           - Use ``predict_proba()`` to get the full probability distribution
+           - Rating classes are determined from ``rating_step`` parameter
     embed_size: int, default: 16
         Vector size of embeddings.
     n_epochs: int, default: 10
@@ -128,6 +141,11 @@ class WideDeep(TfBase, metaclass=ModelMeta):
           the same weighting scheme as WMSE loss. This helps the model learn better
           representations for items with few interactions.
 
+    rating_step : float, default: 0.5
+        Step size between rating classes when using ``loss_type='softmax'``.
+        For example, with min_rating=0.5, max_rating=5.0, and rating_step=0.5,
+        the rating classes are: [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0].
+        Only used when ``loss_type='softmax'`` and ``task='rating'``.
     seed : int, default: 42
         Random seed.
     lower_upper_bound : tuple or None, default: None
@@ -180,6 +198,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         interaction_wide_only=None,
         interaction_deep_only=None,
         pos_sampler="random",
+        rating_step=0.5,
         seed=42,
         lower_upper_bound=None,
         tf_sess_config=None,
@@ -207,6 +226,7 @@ class WideDeep(TfBase, metaclass=ModelMeta):
         self.interaction_wide_only = interaction_wide_only
         self.interaction_deep_only = interaction_deep_only
         self.pos_sampler = pos_sampler
+        self.rating_step = rating_step
         self.seed = seed
         
         # Validate pos_sampler
@@ -214,6 +234,14 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             raise ValueError(
                 f"`pos_sampler` must be one of ('random', 'unpopular'), got {pos_sampler}"
             )
+        
+        # Setup rating classification if using softmax loss for rating task
+        if task == "rating" and loss_type == "softmax":
+            self._setup_rating_classification(data_info, rating_step)
+        else:
+            self.rating_labels = None
+            self.rating_label_to_index = None
+            self.n_rating_classes = None
         self.sparse = check_sparse_indices(data_info)
         self.dense = check_dense_values(data_info)
         if self.sparse:
@@ -249,7 +277,11 @@ class WideDeep(TfBase, metaclass=ModelMeta):
 
     def build_model(self):
         tf.set_random_seed(self.seed)
-        self.labels = tf.placeholder(tf.float32, shape=[None])
+        # For softmax rating classification, labels are integer class indices
+        if self.task == "rating" and self.loss_type == "softmax":
+            self.labels = tf.placeholder(tf.int32, shape=[None])
+        else:
+            self.labels = tf.placeholder(tf.float32, shape=[None])
         self.is_training = tf.placeholder_with_default(False, shape=[])
         self.wide_embed, self.deep_embed = [], []
 
@@ -264,8 +296,6 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             self._build_interaction_dense()
 
         wide_embed = tf.concat(self.wide_embed, axis=1)
-        wide_term = tf_dense(units=1, name="wide_term")(wide_embed)
-
         deep_embed = tf.concat(self.deep_embed, axis=1)
         deep_layer = dense_nn(
             deep_embed,
@@ -275,10 +305,143 @@ class WideDeep(TfBase, metaclass=ModelMeta):
             is_training=self.is_training,
             name="deep",
         )
-        deep_term = tf_dense(units=1, name="deep_term")(deep_layer)
-        self.output = tf.squeeze(tf.add(wide_term, deep_term))
+
+        # Build output layer based on loss type
+        if self.task == "rating" and self.loss_type == "softmax":
+            # Multi-class classification: output logits for each rating class
+            wide_term = tf_dense(units=self.n_rating_classes, name="wide_term")(wide_embed)
+            deep_term = tf_dense(units=self.n_rating_classes, name="deep_term")(deep_layer)
+            self.logits = tf.add(wide_term, deep_term)  # [batch, n_classes]
+            
+            # Softmax probabilities for each class
+            self.class_probs = tf.nn.softmax(self.logits, axis=1)
+            
+            # Predicted rating: weighted average using probabilities (expectation)
+            # This is better than argmax for continuous-ish predictions
+            rating_labels_tf = tf.constant(self.rating_labels, dtype=tf.float32)
+            self.output = tf.reduce_sum(
+                self.class_probs * rating_labels_tf, axis=1
+            )
+            
+            # Also store argmax prediction (most likely class)
+            predicted_class = tf.argmax(self.class_probs, axis=1)
+            self.output_argmax = tf.gather(rating_labels_tf, predicted_class)
+        else:
+            # Standard regression/binary output
+            wide_term = tf_dense(units=1, name="wide_term")(wide_embed)
+            deep_term = tf_dense(units=1, name="deep_term")(deep_layer)
+            self.output = tf.squeeze(tf.add(wide_term, deep_term))
+        
         self.serving_topk = self.build_topk(self.output)
         count_params()
+
+    def predict_proba(self, user, item, feats=None, cold_start="average", inner_id=False):
+        """Predict probability distribution over rating classes.
+        
+        Only available when ``loss_type='softmax'`` and ``task='rating'``.
+        
+        Parameters
+        ----------
+        user : int, str, array_like
+            User id or array of user ids.
+        item : int, str, array_like
+            Item id or array of item ids.
+        feats : dict or pandas.DataFrame, optional
+            Extra features for prediction.
+        cold_start : {'average', 'popular'}, default: 'average'
+            Strategy for cold start users/items.
+        inner_id : bool, default: False
+            Whether input ids are inner ids (vs original ids).
+            
+        Returns
+        -------
+        dict
+            Dictionary with:
+            - 'rating_classes': array of rating values (e.g., [0.5, 1.0, ..., 5.0])
+            - 'probabilities': array of shape (n_samples, n_classes) with probabilities
+            - 'predicted_ratings': array of predicted ratings (expectation)
+            - 'predicted_ratings_argmax': array of ratings with highest probability
+            
+        Raises
+        ------
+        ValueError
+            If model is not configured with ``loss_type='softmax'`` for rating task.
+            
+        Examples
+        --------
+        >>> result = model.predict_proba(user=1, item=[10, 20, 30])
+        >>> print(result['rating_classes'])
+        [0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5 5.0]
+        >>> print(result['probabilities'].shape)
+        (3, 10)
+        >>> print(result['predicted_ratings'])
+        [3.2, 4.1, 2.8]
+        """
+        if self.task != "rating" or self.loss_type != "softmax":
+            raise ValueError(
+                "predict_proba() is only available when loss_type='softmax' "
+                "and task='rating'."
+            )
+        
+        from ..prediction.preprocess import (
+            convert_id,
+            get_original_feats,
+            set_temp_feats,
+            set_temp_feats_from_dataframe,
+        )
+        from ..utils.validate import check_unknown
+        import pandas as pd
+        
+        user, item = convert_id(self, user, item, inner_id)
+        unknown_num, unknown_index, user, item = check_unknown(self, user, item)
+        
+        has_sparse = self.sparse if hasattr(self, "sparse") else None
+        has_dense = self.dense if hasattr(self, "dense") else None
+        (
+            user_indices,
+            item_indices,
+            sparse_indices,
+            dense_values,
+        ) = get_original_feats(self.data_info, user, item, has_sparse, has_dense)
+        
+        if feats is not None:
+            if isinstance(feats, dict):
+                assert len(user_indices) == 1, "Predict with dict feats only supports single user."
+                sparse_indices, dense_values = set_temp_feats(
+                    self.data_info, sparse_indices, dense_values, feats
+                )
+            elif isinstance(feats, pd.DataFrame):
+                sparse_indices, dense_values = set_temp_feats_from_dataframe(
+                    self.data_info, sparse_indices, dense_values, feats
+                )
+        
+        feed_dict = get_feed_dict(
+            model=self,
+            user_indices=user_indices,
+            item_indices=item_indices,
+            sparse_indices=sparse_indices,
+            dense_values=dense_values,
+            is_training=False,
+        )
+        
+        probs, preds, preds_argmax = self.sess.run(
+            [self.class_probs, self.output, self.output_argmax],
+            feed_dict
+        )
+        
+        # Handle cold start
+        if unknown_num > 0 and cold_start == "popular":
+            preds[unknown_index] = self.default_pred
+            preds_argmax[unknown_index] = self.default_pred
+            # Set uniform distribution for unknown users/items
+            probs[unknown_index] = 1.0 / self.n_rating_classes
+        
+        return {
+            'rating_classes': self.rating_labels.copy(),
+            'probabilities': probs,
+            'predicted_ratings': preds,
+            'predicted_ratings_argmax': preds_argmax,
+        }
 
     def _build_user_item(self):
         self.user_indices = tf.placeholder(tf.int32, shape=[None])
@@ -822,6 +985,33 @@ class WideDeep(TfBase, metaclass=ModelMeta):
                 flatten=True,
             )
             self.deep_embed.append(deep_both_embed)
+
+    def _setup_rating_classification(self, data_info, rating_step):
+        """Setup rating classes for softmax classification approach.
+        
+        Creates discrete rating classes from min to max rating with given step.
+        
+        Parameters
+        ----------
+        data_info : DataInfo
+            Data info object containing min/max rating.
+        rating_step : float
+            Step size between rating classes.
+        """
+        min_rating, max_rating = data_info.min_max_rating
+        
+        # Generate rating classes: e.g., [0.5, 1.0, 1.5, 2.0, ..., 5.0]
+        # Use np.arange with small epsilon to include max_rating
+        self.rating_labels = np.arange(min_rating, max_rating + rating_step / 2, rating_step)
+        self.n_rating_classes = len(self.rating_labels)
+        
+        # Create mapping from rating value to class index
+        self.rating_label_to_index = {
+            rating: idx for idx, rating in enumerate(self.rating_labels)
+        }
+        
+        # Store as float32 for TensorFlow
+        self.rating_labels = self.rating_labels.astype(np.float32)
 
     @staticmethod
     def check_lr(lr):
