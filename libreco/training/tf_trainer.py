@@ -77,6 +77,13 @@ class TensorFlowTrainer(BaseTrainer):
             num_workers,
             self.model.seed,
         )
+        
+        # History tracking for learning curves
+        history = {
+            'epoch': [],
+            'train_loss': [],
+        }
+        
         for epoch in range(1, self.n_epochs + 1):
             if self.lr_decay and verbose > 0:
                 print(
@@ -92,10 +99,13 @@ class TensorFlowTrainer(BaseTrainer):
                     train_loss, _ = self.sess.run(fetches, feed_dict)
                     train_total_loss.append(train_loss)
 
+            # Track train loss
+            epoch_train_loss = float(np.mean(train_total_loss))
+            history['epoch'].append(epoch)
+            history['train_loss'].append(epoch_train_loss)
+            
             #if verbose > 1:
-            train_loss_str = "train_loss: " + str(
-                round(float(np.mean(train_total_loss)), 4)
-            )
+            train_loss_str = "train_loss: " + str(round(epoch_train_loss, 4))
             print(f"\t {colorize(train_loss_str, 'green')}")
             # get embedding for evaluation
             if EmbeddingModels.contains(self.model.model_name):
@@ -111,10 +121,20 @@ class TensorFlowTrainer(BaseTrainer):
                 sample_user_num=eval_user_num,
                 seed=self.model.seed,
             )
+            
+            # Track eval metrics in history
+            if eval_metrics:
+                for metric_name, metric_val in eval_metrics.items():
+                    if metric_name not in history:
+                        history[metric_name] = []
+                    history[metric_name].append(metric_val)
+            
             print("=" * 30)
 
             if early_stop is not None and early_stop(epoch, eval_metrics):
                 break
+        
+        return history
 
     def _build_train_ops(self, **kwargs):
         if self.task == "rating" and self.loss_type == "wmse":
@@ -363,7 +383,7 @@ class WideDeepTrainer(TensorFlowTrainer):
             self._build_optimizer_ops()
             self.sess.run(tf.global_variables_initializer())
 
-        super().run(
+        return super().run(
             train_data,
             neg_sampling,
             verbose,

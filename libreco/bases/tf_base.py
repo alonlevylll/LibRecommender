@@ -130,7 +130,7 @@ class TfBase(Base):
             self.model_built = True
         if self.trainer is None:
             self.trainer = get_trainer(self)
-        self.trainer.run(
+        history = self.trainer.run(
             train_data,
             neg_sampling,
             verbose,
@@ -153,6 +153,7 @@ class TfBase(Base):
             filter_consumed=False,
             random_rec=False,
         ).flatten()
+        return history
 
     def predict(self, user, item, feats=None, cold_start="average", inner_id=False):
         """Make prediction(s) on given user(s) and item(s).
