@@ -9,6 +9,7 @@ from .preprocess import (
     get_cached_dual_seq,
     get_cached_seqs,
     get_original_feats,
+    interaction_features_from_batch,
     set_temp_feats,
     set_temp_feats_from_dataframe,
 )
@@ -191,6 +192,27 @@ def predict_tf_feat(model, user, item, feats, cold_start, inner_id):
 def predict_data_with_feats(
     model, data, batch_size=None, cold_start="average", inner_id=False
 ):
+    """Predict ratings/rankings for user-item pairs with features from DataFrame.
+    
+    Parameters
+    ----------
+    model : Model
+        Trained model with feature support.
+    data : pd.DataFrame
+        DataFrame containing 'user', 'item' columns and feature columns.
+        For models with interaction features, also include interaction feature columns.
+    batch_size : int or None
+        Batch size for prediction. If None, uses entire data.
+    cold_start : str
+        How to handle unknown users/items.
+    inner_id : bool
+        Whether user/item IDs are already inner IDs.
+        
+    Returns
+    -------
+    np.ndarray
+        Predicted scores for each user-item pair.
+    """
     assert isinstance(data, pd.DataFrame), "Data must be pandas DataFrame"
     user, item = convert_id(model, data.user, data.item, inner_id)
     unknown_num, unknown_index, user, item = check_unknown(model, user, item)
@@ -204,6 +226,10 @@ def predict_data_with_feats(
         item_indices = item[batch_slice]
         sparse_indices, dense_values = features_from_batch(
             model.data_info, model.sparse, model.dense, batch_data
+        )
+        # Get interaction features if model uses them
+        interaction_sparse_indices, interaction_dense_values = interaction_features_from_batch(
+            model.data_info, model, batch_data
         )
         # Get user rating vectors/stats for inference (without masking)
         user_rating_vectors = get_user_rating_vectors_for_inference(model, user_indices)
@@ -238,6 +264,8 @@ def predict_data_with_feats(
                 user_interacted_len=seq_len,
                 user_rating_vectors=user_rating_vectors,
                 user_rating_stats=user_rating_stats,
+                interaction_sparse_indices=interaction_sparse_indices,
+                interaction_dense_values=interaction_dense_values,
                 is_training=False,
             )
             preds[batch_slice] = model.sess.run(model.output, feed_dict)

@@ -982,6 +982,10 @@ class LazyCollator(BaseCollator):
             user_indices, item_indices, mask_current_item=True
         )
 
+        # Get interaction features if available (passed through from batch)
+        interaction_sparse_batch = batch.get("interaction_sparse")
+        interaction_dense_batch = batch.get("interaction_dense")
+
         if self.dual_seq:
             batch_cls = PointwiseDualSeqBatch
         elif self.separate_features:
@@ -998,6 +1002,8 @@ class LazyCollator(BaseCollator):
             seqs=seq_batch,
             user_rating_vectors=user_rating_vectors,
             user_rating_stats=user_rating_stats,
+            interaction_sparse_indices=interaction_sparse_batch,
+            interaction_dense_values=interaction_dense_batch,
             backend=self.backend,
         )
 

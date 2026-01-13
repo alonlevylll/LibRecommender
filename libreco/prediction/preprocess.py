@@ -201,6 +201,74 @@ def features_from_batch(data_info, sparse, dense, data):
     return sparse_indices, dense_values
 
 
+def interaction_features_from_batch(data_info, model, data):
+    """Extract interaction-level features from batch data for prediction.
+    
+    Parameters
+    ----------
+    data_info : DataInfo
+        Data info object containing feature mappings.
+    model : Model
+        The model (used to check if it has interaction features).
+    data : pd.DataFrame
+        DataFrame containing user, item, and interaction feature columns.
+        
+    Returns
+    -------
+    interaction_sparse_indices : np.ndarray or None
+        Interaction sparse feature indices [batch_size, n_interaction_sparse].
+    interaction_dense_values : np.ndarray or None
+        Interaction dense feature values [batch_size, n_interaction_dense].
+    """
+    interaction_sparse_indices = None
+    interaction_dense_values = None
+    
+    # Check for interaction sparse features
+    has_interaction_sparse = getattr(model, "interaction_sparse", False)
+    if has_interaction_sparse and "interaction_sparse_col" in data_info.col_name_mapping:
+        interaction_sparse_col_mapping = data_info.col_name_mapping["interaction_sparse_col"]
+        n_cols = len(interaction_sparse_col_mapping)
+        interaction_sparse_indices = np.zeros((len(data), n_cols), np.int32)
+        
+        for col, field_idx in interaction_sparse_col_mapping.items():
+            if col not in data.columns:
+                raise ValueError(
+                    f"Interaction sparse column `{col}` doesn't exist in data. "
+                    f"Required columns: {list(interaction_sparse_col_mapping.keys())}"
+                )
+            interaction_sparse_indices[:, field_idx] = _compute_interaction_sparse_indices(
+                data_info, data, field_idx, col
+            )
+    
+    # Check for interaction dense features
+    has_interaction_dense = getattr(model, "interaction_dense", False)
+    if has_interaction_dense and "interaction_dense_col" in data_info.col_name_mapping:
+        interaction_dense_cols = list(data_info.col_name_mapping["interaction_dense_col"].keys())
+        for col in interaction_dense_cols:
+            if col not in data.columns:
+                raise ValueError(
+                    f"Interaction dense column `{col}` doesn't exist in data. "
+                    f"Required columns: {interaction_dense_cols}"
+                )
+        interaction_dense_values = data[interaction_dense_cols].to_numpy(dtype=np.float32)
+    
+    return interaction_sparse_indices, interaction_dense_values
+
+
+def _compute_interaction_sparse_indices(data_info, data, field_idx, col):
+    """Compute sparse indices for interaction-level features."""
+    offset = data_info.interaction_sparse_offset[field_idx]
+    unique_vals = data_info.interaction_sparse_unique_vals[col]
+    val_to_idx = {v: i for i, v in enumerate(unique_vals)}
+    oov_idx = len(unique_vals)  # OOV position
+    
+    values = data[col].tolist()
+    return np.array(
+        [val_to_idx.get(v, oov_idx) + offset for v in values],
+        dtype=np.int32
+    )
+
+
 def _compute_sparse_feat_indices(data_info, data, field_idx, col):
     offset = data_info.sparse_offset[field_idx]
     oov_val = data_info.sparse_oov[field_idx]

@@ -593,6 +593,8 @@ class DatasetFeat(_Dataset):
         sparse_col=None,
         dense_col=None,
         multi_sparse_col=None,
+        interaction_sparse_col=None,
+        interaction_dense_col=None,
         pad_val="missing",
         shuffle=False,
         seed=42,
@@ -607,6 +609,7 @@ class DatasetFeat(_Dataset):
         ----------
         interactions : pandas.DataFrame
             Interaction data containing ``user``, ``item``, ``label`` columns.
+            Can also contain interaction-level feature columns.
         user_features : pandas.DataFrame or None, default: None
             User features DataFrame containing ``user`` column and feature columns.
             Features will be joined with interactions during batch processing.
@@ -623,6 +626,14 @@ class DatasetFeat(_Dataset):
             Nested lists of multi_sparse feature columns names.
         dense_col : list of str or None, default: None
             List of dense feature column names.
+        interaction_sparse_col : list of str or None, default: None
+            List of interaction-level sparse feature column names. These features
+            vary per interaction row (e.g., user-item genre bias bin). Must exist
+            in interactions DataFrame.
+        interaction_dense_col : list of str or None, default: None
+            List of interaction-level dense feature column names. These features
+            vary per interaction row (e.g., LOO user-genre bias). Must exist in
+            interactions DataFrame.
         pad_val : int or str or list, default: "missing"
             Padding value in multi_sparse columns.
         shuffle : bool, default: False
@@ -641,7 +652,7 @@ class DatasetFeat(_Dataset):
         --------
         >>> from libreco.data import DatasetFeat
         >>> # Separate interactions from features
-        >>> interactions = train_df[["user", "item", "label"]]
+        >>> interactions = train_df[["user", "item", "label", "user_genre_bias"]]
         >>> user_features = train_df[["user", "age", "gender"]].drop_duplicates("user")
         >>> item_features = train_df[["item", "category"]].drop_duplicates("item")
         >>> train_data, data_info = DatasetFeat.build_trainset_lazy(
@@ -651,6 +662,7 @@ class DatasetFeat(_Dataset):
         ...     user_col=["age", "gender"],
         ...     item_col=["category"],
         ...     sparse_col=["age", "gender", "category"],
+        ...     interaction_dense_col=["user_genre_bias"],  # Interaction-level feature
         ... )
         """
         cls._check_subclass()
@@ -690,10 +702,26 @@ class DatasetFeat(_Dataset):
             else sparse_col
         )
 
-        # Build column name mapping
+        # Build column name mapping (include interaction features)
         col_name_mapping = col_name2index(
-            user_col, item_col, all_sparse_col, cls.dense_col
+            user_col, item_col, all_sparse_col, cls.dense_col,
+            interaction_sparse_col, interaction_dense_col
         )
+
+        # Process interaction-level features from interactions DataFrame
+        interaction_sparse_indices = None
+        interaction_dense_values = None
+        if interaction_sparse_col:
+            cls.interaction_sparse_unique_vals = _get_sparse_unique_vals(
+                interaction_sparse_col, interactions
+            )
+            interaction_sparse_indices = _transform_interaction_sparse(
+                interactions, interaction_sparse_col, cls.interaction_sparse_unique_vals
+            )
+        if interaction_dense_col:
+            interaction_dense_values = interactions[interaction_dense_col].to_numpy(
+                dtype=np.float32
+            )
 
         # Get column names from col_name_mapping to ensure correct ordering
         # This matches the standard build_trainset flow where columns are ordered
@@ -763,6 +791,8 @@ class DatasetFeat(_Dataset):
             user_dense_col=user_dense_col_names if user_dense_col_names else None,
             item_sparse_col=item_sparse_col_names if item_sparse_col_names else None,
             item_dense_col=item_dense_col_names if item_dense_col_names else None,
+            interaction_sparse_indices=interaction_sparse_indices,
+            interaction_dense_values=interaction_dense_values,
         )
 
         interaction_data = interactions[["user", "item", "label"]]
@@ -789,6 +819,15 @@ class DatasetFeat(_Dataset):
         data_info.lazy_user_features_df = user_features
         data_info.lazy_item_features_df = item_features
         data_info.lazy_mode = True
+
+        # Store interaction feature metadata in data_info
+        if interaction_sparse_col:
+            data_info.interaction_sparse_unique_vals = cls.interaction_sparse_unique_vals
+            data_info.interaction_sparse_offset = _compute_interaction_sparse_offset(
+                interaction_sparse_col, cls.interaction_sparse_unique_vals
+            )
+        if interaction_dense_col:
+            data_info.n_interaction_dense = len(interaction_dense_col)
 
         cls.train_called = True
         return train_transformed, data_info

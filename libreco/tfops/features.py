@@ -1,3 +1,5 @@
+import numpy as np
+
 from .variables import get_variable_from_graph
 from .version import tf
 from ..layers import embedding_lookup, layer_normalization
@@ -293,11 +295,23 @@ def get_feed_dict(
     # Feed pre-computed stats only when stats enabled but not rating vector or preference sparse
     elif use_rating_stats and not use_rating_vector and not use_preference_sparse and user_rating_stats is not None:
         feed_dict.update({model.user_rating_stats: user_rating_stats})
-    # Interaction-level features
-    if hasattr(model, "interaction_sparse_indices") and interaction_sparse_indices is not None:
-        feed_dict.update({model.interaction_sparse_indices: interaction_sparse_indices})
-    if hasattr(model, "interaction_dense_values") and interaction_dense_values is not None:
-        feed_dict.update({model.interaction_dense_values: interaction_dense_values})
+    # Interaction-level features - provide zeros if not given but model requires them
+    if hasattr(model, "interaction_sparse_indices"):
+        if interaction_sparse_indices is not None:
+            feed_dict.update({model.interaction_sparse_indices: interaction_sparse_indices})
+        elif user_indices is not None:
+            # Provide zeros for inference when interaction features weren't passed
+            batch_size = len(user_indices) if hasattr(user_indices, '__len__') else 1
+            zeros = np.zeros((batch_size, model.interaction_sparse_field_size), dtype=np.int32)
+            feed_dict.update({model.interaction_sparse_indices: zeros})
+    if hasattr(model, "interaction_dense_values"):
+        if interaction_dense_values is not None:
+            feed_dict.update({model.interaction_dense_values: interaction_dense_values})
+        elif user_indices is not None:
+            # Provide zeros for inference when interaction features weren't passed
+            batch_size = len(user_indices) if hasattr(user_indices, '__len__') else 1
+            zeros = np.zeros((batch_size, model.interaction_dense_field_size), dtype=np.float32)
+            feed_dict.update({model.interaction_dense_values: zeros})
     return feed_dict
 
 

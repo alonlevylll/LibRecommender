@@ -89,11 +89,15 @@ class LazyBatchData(torch.utils.data.Dataset):
         self.user_dense_col = data.user_dense_col
         self.item_sparse_col = data.item_sparse_col
         self.item_dense_col = data.item_dense_col
+        # Store interaction-level features (per-row, not lazily loaded)
+        self.interaction_sparse_indices = data.interaction_sparse_indices
+        self.interaction_dense_values = data.interaction_dense_values
 
     def __getitem__(self, idx):
         """Return batch of user/item indices and labels without features.
 
         Features will be joined by the collator.
+        Interaction features are returned directly (they are per-row).
         """
         batch = {
             "user": self.user_indices[idx],
@@ -101,6 +105,11 @@ class LazyBatchData(torch.utils.data.Dataset):
             "label": self.labels[idx],
             "is_lazy": True,
         }
+        # Include interaction features if available (indexed by row)
+        if self.interaction_sparse_indices is not None:
+            batch["interaction_sparse"] = self.interaction_sparse_indices[idx]
+        if self.interaction_dense_values is not None:
+            batch["interaction_dense"] = self.interaction_dense_values[idx]
         return batch
 
     def __len__(self):

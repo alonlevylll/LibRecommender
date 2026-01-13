@@ -154,6 +154,10 @@ class LazyTransformedSet:
         List of item sparse column names.
     item_dense_col : list of str or None
         List of item dense column names.
+    interaction_sparse_indices : numpy.ndarray or None
+        Pre-computed interaction-level sparse feature indices (per row).
+    interaction_dense_values : numpy.ndarray or None
+        Interaction-level dense feature values (per row).
 
     See Also
     --------
@@ -175,6 +179,8 @@ class LazyTransformedSet:
         user_dense_col: Optional[List[str]] = None,
         item_sparse_col: Optional[List[str]] = None,
         item_dense_col: Optional[List[str]] = None,
+        interaction_sparse_indices: Optional[np.ndarray] = None,
+        interaction_dense_values: Optional[np.ndarray] = None,
     ):
         self._user_indices = user_indices
         self._item_indices = item_indices
@@ -188,6 +194,8 @@ class LazyTransformedSet:
         self._user_dense_col = user_dense_col
         self._item_sparse_col = item_sparse_col
         self._item_dense_col = item_dense_col
+        self._interaction_sparse_indices = interaction_sparse_indices
+        self._interaction_dense_values = interaction_dense_values
         self._sparse_interaction = self.construct_sparse()
         # For compatibility, these are None (not precomputed)
         self._sparse_indices = None
@@ -290,6 +298,16 @@ class LazyTransformedSet:
         """Item dense column names."""
         return self._item_dense_col
 
+    @property
+    def interaction_sparse_indices(self):
+        """Interaction-level sparse feature indices (per row)."""
+        return self._interaction_sparse_indices
+
+    @property
+    def interaction_dense_values(self):
+        """Interaction-level dense feature values (per row)."""
+        return self._interaction_dense_values
+
 
 class TransformedEvalSet:
     """Dataset after transforming.
@@ -305,12 +323,25 @@ class TransformedEvalSet:
         All item rows in data, represented in inner id.
     labels : numpy.ndarray
         All labels in data.
+    interaction_sparse_indices : numpy.ndarray or None
+        Interaction-level sparse feature indices.
+    interaction_dense_values : numpy.ndarray or None
+        Interaction-level dense feature values.
     """
 
-    def __init__(self, user_indices, item_indices, labels):
+    def __init__(
+        self, 
+        user_indices, 
+        item_indices, 
+        labels,
+        interaction_sparse_indices=None,
+        interaction_dense_values=None,
+    ):
         self.user_indices = np.asarray(user_indices)
         self.item_indices = np.asarray(item_indices)
         self.labels = np.asarray(labels)
+        self.interaction_sparse_indices = interaction_sparse_indices
+        self.interaction_dense_values = interaction_dense_values
         self.has_sampled = False
         self.positive_consumed = self._get_positive_consumed()
 
@@ -353,6 +384,19 @@ class TransformedEvalSet:
         assert len(self.item_indices) == len(items_neg) * (num_neg + 1) / num_neg
         for i in range(num_neg):
             self.item_indices[(i + 1) :: (num_neg + 1)] = items_neg[i::num_neg]
+        
+        # Handle interaction features - repeat for positive samples, use zeros for negatives
+        # Note: interaction features for negative samples are set to 0 (no valid interaction)
+        if self.interaction_sparse_indices is not None:
+            n_features = self.interaction_sparse_indices.shape[1]
+            new_sparse = np.zeros((len(self.user_indices), n_features), dtype=np.int32)
+            new_sparse[:: (num_neg + 1)] = self.interaction_sparse_indices
+            self.interaction_sparse_indices = new_sparse
+        if self.interaction_dense_values is not None:
+            n_features = self.interaction_dense_values.shape[1]
+            new_dense = np.zeros((len(self.user_indices), n_features), dtype=np.float32)
+            new_dense[:: (num_neg + 1)] = self.interaction_dense_values
+            self.interaction_dense_values = new_dense
 
     def _sample_neg_items(self, users, items, n_items, num_neg):
         user_consumed, _ = interaction_consumed(self.user_indices, self.item_indices)
@@ -367,3 +411,19 @@ class TransformedEvalSet:
     def __getitem__(self, index):
         """Get a slice of data."""
         return self.user_indices[index], self.item_indices[index], self.labels[index]
+
+    def get_interaction_features(self, index):
+        """Get interaction features for a slice of data.
+        
+        Returns
+        -------
+        tuple
+            (interaction_sparse_indices, interaction_dense_values) or (None, None)
+        """
+        sparse = None
+        dense = None
+        if self.interaction_sparse_indices is not None:
+            sparse = self.interaction_sparse_indices[index]
+        if self.interaction_dense_values is not None:
+            dense = self.interaction_dense_values[index]
+        return sparse, dense

@@ -1,3 +1,5 @@
+import numpy as np
+
 from .batch_unit import (
     PairwiseBatch,
     PointwiseBatch,
@@ -171,13 +173,23 @@ def _pointwise_feed_dict(model, data: PointwiseBatch, is_training):
     elif use_rating_stats and not use_rating_vector and not use_preference_sparse and hasattr(data, "user_rating_stats") and data.user_rating_stats is not None:
         feed_dict.update({model.user_rating_stats: data.user_rating_stats})
     
-    # Interaction-level features
+    # Interaction-level features - provide zeros if not given but model requires them
     if hasattr(model, "interaction_sparse") and model.interaction_sparse:
         if hasattr(data, "interaction_sparse_indices") and data.interaction_sparse_indices is not None:
             feed_dict.update({model.interaction_sparse_indices: data.interaction_sparse_indices})
+        else:
+            # Provide zeros when interaction features aren't available
+            batch_size = len(data.users)
+            zeros = np.zeros((batch_size, model.interaction_sparse_field_size), dtype=np.int32)
+            feed_dict.update({model.interaction_sparse_indices: zeros})
     if hasattr(model, "interaction_dense") and model.interaction_dense:
         if hasattr(data, "interaction_dense_values") and data.interaction_dense_values is not None:
             feed_dict.update({model.interaction_dense_values: data.interaction_dense_values})
+        else:
+            # Provide zeros when interaction features aren't available
+            batch_size = len(data.users)
+            zeros = np.zeros((batch_size, model.interaction_dense_field_size), dtype=np.float32)
+            feed_dict.update({model.interaction_dense_values: zeros})
     
     return feed_dict
 

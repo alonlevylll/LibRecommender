@@ -200,7 +200,7 @@ def print_metrics(
     # if train_data:
     #    train_metrics = metrics_fn(data=train_data, metrics=[loss_name])
     #    print(f"\t train {loss_name}: {train_metrics[loss_name]:.4f}")
-    if eval_data:
+    if eval_data is not None:
         eval_metrics = metrics_fn(data=eval_data, metrics=metrics)
         for m, val in eval_metrics.items():
             if m == "loss":
